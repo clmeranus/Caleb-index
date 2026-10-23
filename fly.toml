@@ -5,8 +5,25 @@
 
 app = 'caleb-index'
 primary_region = 'ams'
+kill_signal = 'SIGINT'
+kill_timeout = '5s'
 
 [build]
+
+[env]
+  PORT = '8080'
+  DATABASE_PATH = '/data/calebs.db'
+  COOKIE_SECURE = '1'
+  # Fly's proxy sets this header to the visitor's address.
+  CLIENT_IP_HEADER = 'Fly-Client-IP'
+  VOUCHES_REQUIRED = '2'
+
+# The SQLite database lives on this volume so it survives deploys and restarts.
+# A volume belongs to one machine, so the app must run as a single machine.
+[mounts]
+  source = 'caleb_data'
+  destination = '/data'
+  initial_size = '1gb'
 
 [http_service]
   internal_port = 8080
@@ -16,8 +33,14 @@ primary_region = 'ams'
   min_machines_running = 0
   processes = ['app']
 
+  [[http_service.checks]]
+    grace_period = '10s'
+    interval = '30s'
+    method = 'GET'
+    path = '/healthz'
+    timeout = '5s'
+
 [[vm]]
-  memory = '1gb'
+  memory = '256mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256

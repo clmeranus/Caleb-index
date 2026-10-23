@@ -113,11 +113,15 @@ function parseCookies(header = '') {
   return out;
 }
 
-// The visitor's address. Behind a reverse proxy, each proxy appends the address it
-// received the request from to X-Forwarded-For, so with `hops` trusted proxies the
-// visitor is the hops-th entry from the end. Entries further left can be forged.
-function clientIp(req, hops) {
+// The visitor's address, used for rate limits. Behind a reverse proxy the connection
+// comes from the proxy, so the address must come from a header the proxy sets:
+// - `header`: a header the host's proxy always sets itself (Fly.io: Fly-Client-IP).
+// - `hops`: otherwise, each proxy appends the address it received the request from
+//   to X-Forwarded-For, so with `hops` trusted proxies the visitor is the hops-th
+//   entry from the end. Entries further left can be forged by the visitor.
+function clientIp(req, { header, hops } = {}) {
   const remote = req.socket.remoteAddress || 'unknown';
+  if (header) return String(req.headers[header.toLowerCase()] || '').trim() || remote;
   if (!hops) return remote;
   const chain = String(req.headers['x-forwarded-for'] || '')
     .split(',')
@@ -185,7 +189,7 @@ function createServer({
   db,
   secureCookies = process.env.COOKIE_SECURE === '1',
   vouchesRequired = Number(process.env.VOUCHES_REQUIRED) || 2,
-  proxyHops = Number(process.env.TRUST_PROXY_HOPS) || 0,
+  proxy = { header: process.env.CLIENT_IP_HEADER, hops: Number(process.env.TRUST_PROXY_HOPS) || 0 },
   registerLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
   loginLimit = rateLimiter({ max: 10, windowMs: 15 * 60 * 1000 }),
 } = {}) {
@@ -447,7 +451,7 @@ function createServer({
         url,
         token,
         member: store.sessionMember(db, token),
-        ip: clientIp(req, proxyHops),
+        ip: clientIp(req, proxy),
       };
       if (url.pathname.startsWith('/api/')) return await api(ctx);
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
@@ -475,16 +479,18 @@ if (require.main === module) {
     const server = createServer({ db }).listen(port, () => {
       console.log(`Caleb Index listening on http://localhost:${port}`);
     });
-    // Hosts stop the old instance with SIGTERM on every deploy: finish in-flight
-    // requests and close the database cleanly.
-    process.on('SIGTERM', () => {
+    // Hosts stop the old instance on every deploy (Render with SIGTERM, Fly.io with
+    // SIGINT): finish in-flight requests and close the database cleanly.
+    const shutdown = () => {
       server.close(() => {
         db.close();
         process.exit(0);
       });
       server.closeIdleConnections();
-      setTimeout(() => process.exit(0), 10_000).unref();
-    });
+      setTimeout(() => process.exit(0), 4_000).unref();
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
   })().catch((err) => {
     console.error(err.message);
     process.exit(1);

@@ -328,13 +328,18 @@ test('config reports how many vouches are required', async () => {
   assert.deepEqual(res.body, { vouchesRequired: 2 });
 });
 
-test('client IP comes from the trusted end of X-Forwarded-For', () => {
-  const req = (xff) => ({ socket: { remoteAddress: '10.0.0.1' }, headers: xff ? { 'x-forwarded-for': xff } : {} });
-  assert.equal(clientIp(req('1.1.1.1'), 0), '10.0.0.1', 'ignored unless proxies are trusted');
-  assert.equal(clientIp(req('1.1.1.1, 172.64.0.9'), 2), '1.1.1.1');
-  assert.equal(clientIp(req('6.6.6.6, 1.1.1.1, 172.64.0.9'), 2), '1.1.1.1', 'a forged first entry is skipped');
-  assert.equal(clientIp(req('1.1.1.1'), 2), '1.1.1.1');
-  assert.equal(clientIp(req(''), 2), '10.0.0.1');
+test('client IP comes from the proxy header or the trusted end of X-Forwarded-For', () => {
+  const req = (headers) => ({ socket: { remoteAddress: '10.0.0.1' }, headers });
+  const xff = (v) => req({ 'x-forwarded-for': v });
+  assert.equal(clientIp(xff('1.1.1.1')), '10.0.0.1', 'ignored unless a proxy is trusted');
+  assert.equal(clientIp(xff('1.1.1.1, 172.64.0.9'), { hops: 2 }), '1.1.1.1');
+  assert.equal(clientIp(xff('6.6.6.6, 1.1.1.1, 172.64.0.9'), { hops: 2 }), '1.1.1.1', 'a forged first entry is skipped');
+  assert.equal(clientIp(xff('1.1.1.1'), { hops: 2 }), '1.1.1.1');
+  assert.equal(clientIp(xff(''), { hops: 2 }), '10.0.0.1');
+
+  const fly = { header: 'Fly-Client-IP' };
+  assert.equal(clientIp(req({ 'fly-client-ip': '2.2.2.2', 'x-forwarded-for': '6.6.6.6' }), fly), '2.2.2.2');
+  assert.equal(clientIp(req({}), fly), '10.0.0.1', 'falls back to the connection address');
 });
 
 test('health check', async () => {
