@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review applications · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h1>Review applications</h1>
+    <p class="lede">Check that each applicant's name really is Caleb (or a recognized spelling) using the evidence they gave.
+      Approving them assigns the next Caleb Number and lets them into the Index.</p>
+    <div id="queue" class="queue"><p class="note">Loading…</p></div>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const queue = document.getElementById('queue');
+
+    // Turns http(s) URLs in the applicant's note into links, leaving the rest as text.
+    function linkify(text) {
+      return text.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
+        i % 2 ? el('a', { href: part, target: '_blank', rel: 'noopener noreferrer nofollow' }, part) : part
+      );
+    }
+
+    function applicantCard(a) {
+      const out = el('div');
+      const reason = el('input', { placeholder: 'Reason (shown to the applicant if you reject)', maxlength: 500, 'aria-label': 'Rejection reason' });
+      const decide = async (action) => {
+        try {
+          await api(`/api/admin/members/${a.id}/${action}`, { method: 'POST', body: { reason: reason.value } });
+          card.replaceWith(noticeBox(action === 'verify' ? `${fullName(a)} (${a.username}) has been verified.` : `${a.username}'s application was rejected.`));
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      };
+      const details = [
+        ['Username', a.username],
+        ['Location', place(a)],
+        ['Born', a.birth_year],
+        ['Occupation', a.occupation],
+        ['Website', a.website && el('a', { href: a.website, target: '_blank', rel: 'noopener noreferrer nofollow' }, a.website)],
+        ['Applied', new Date(a.created_at).toLocaleString()],
+      ].filter(([, v]) => v);
+      const card = el('article', { class: 'panel applicant' },
+        el('h2', { style: 'margin-top:0' }, fullName(a)),
+        el('dl', {}, details.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+        a.bio && el('p', { class: 'bio' }, a.bio),
+        el('div', { class: 'evidence' }, el('strong', {}, 'Verification evidence'), el('p', {}, linkify(a.verification_note))),
+        reason,
+        out,
+        el('div', { class: 'actions' },
+          el('button', { class: 'btn', type: 'button', onclick: () => decide('verify') }, 'Approve'),
+          el('button', { class: 'btn ghost', type: 'button', onclick: () => decide('reject') }, 'Reject'))
+      );
+      return card;
+    }
+
+    initNav('/admin').then(async (m) => {
+      if (!m) return (location.href = '/login');
+      try {
+        const { applicants } = await api('/api/admin/pending');
+        queue.replaceChildren(
+          ...(applicants.length ? applicants.map(applicantCard) : [el('p', { class: 'empty' }, 'No applications are waiting for review.')])
+        );
+      } catch (err) {
+        queue.replaceChildren(errorBox(err));
+      }
+    });
+  </script>
+</body>
+</html>

@@ -7,12 +7,26 @@ const store = require('./db');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_BODY = 16 * 1024;
+const SESSION_COOKIE = 'sid';
+const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
+};
+
+// Who may load each page. Assets not listed here (CSS, JS, icons) are open to all.
+const PAGES = {
+  '/login': 'guest',
+  '/register': 'guest',
+  '/pending': 'applicant',
+  '/': 'member',
+  '/stats': 'member',
+  '/caleb': 'member',
+  '/account': 'member',
+  '/admin': 'admin',
 };
 
 class HttpError extends Error {
@@ -23,13 +37,22 @@ class HttpError extends Error {
   }
 }
 
-// Fixed-window limiter for registrations, per client address.
+// Returned by a route handler to reply with a status other than 200.
+class Reply {
+  constructor(status, body) {
+    this.status = status;
+    this.body = body;
+  }
+}
+
+// Fixed-window limiter, per key.
 function rateLimiter({ max, windowMs }) {
   const hits = new Map();
   return (key) => {
     const now = Date.now();
     const entry = hits.get(key);
     if (!entry || now - entry.start > windowMs) {
+      if (hits.size > 10_000) hits.clear();
       hits.set(key, { start: now, count: 1 });
       return true;
     }
@@ -39,13 +62,17 @@ function rateLimiter({ max, windowMs }) {
 }
 
 function send(res, status, body, headers = {}) {
-  const json = typeof body === 'string' ? body : JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     ...headers,
   });
-  res.end(json);
+  res.end(JSON.stringify(body));
+}
+
+function redirect(res, location) {
+  res.writeHead(303, { Location: location, 'Cache-Control': 'no-store' });
+  res.end();
 }
 
 function readJson(req) {
@@ -74,18 +101,53 @@ function readJson(req) {
   });
 }
 
+function parseCookies(header = '') {
+  const out = {};
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
 function parseNumber(raw) {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(404, 'No such Caleb.');
   return n;
 }
 
-function serveStatic(req, res, pathname) {
+// Where a visitor should be sent instead of a page they may not see, or null if allowed.
+function pageRedirect(access, member, pathname) {
+  const verified = member && member.status === 'verified';
+  switch (access) {
+    case 'guest':
+      return member ? (verified ? '/' : '/pending') : null;
+    case 'applicant':
+      return !member ? '/login' : verified ? '/' : null;
+    case 'member':
+      if (!member) return pathname === '/' ? '/login' : `/login?next=${encodeURIComponent(pathname)}`;
+      return verified ? null : '/pending';
+    case 'admin':
+      if (!member) return '/login';
+      if (!verified) return '/pending';
+      return member.role === 'admin' ? null : '/';
+    default:
+      return null;
+  }
+}
+
+function serveStatic(req, res, pathname, member) {
+  const access = PAGES[pathname];
+  if (access) {
+    const target = pageRedirect(access, member, pathname);
+    if (target) return redirect(res, target);
+  }
   let rel = pathname === '/' ? '/index.html' : pathname;
   if (!path.extname(rel)) rel += '.html';
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
-  if (!file.startsWith(PUBLIC_DIR + path.sep)) {
-    return send(res, 404, { error: 'Not found.' });
+  if (!file.startsWith(PUBLIC_DIR + path.sep) || (file.endsWith('.html') && !access)) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Not found');
   }
   fs.readFile(file, (err, data) => {
     if (err) {
@@ -95,97 +157,233 @@ function serveStatic(req, res, pathname) {
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'same-origin',
+      ...(file.endsWith('.html') ? { 'Cache-Control': 'no-store' } : {}),
     });
     res.end(req.method === 'HEAD' ? undefined : data);
   });
 }
 
-function createServer({ db, adminToken = process.env.ADMIN_TOKEN, registerLimit } = {}) {
-  const allowRegistration = registerLimit || rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
-
-  // An edit is allowed with the entry's own edit token, or the admin token.
-  function authorize(req, number) {
-    const token = req.headers['x-edit-token'];
-    if (!token) throw new HttpError(401, 'Missing X-Edit-Token header.');
-    if (adminToken && token === adminToken) return;
-    const hash = store.tokenHash(db, number);
-    if (!hash) throw new HttpError(404, 'No such Caleb.');
-    if (!store.tokensMatch(token, hash)) throw new HttpError(403, 'That edit token does not match this entry.');
+function createServer({
+  db,
+  secureCookies = process.env.COOKIE_SECURE === '1',
+  registerLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
+  loginLimit = rateLimiter({ max: 10, windowMs: 15 * 60 * 1000 }),
+} = {}) {
+  function sessionCookie(token, maxAge) {
+    return [
+      `${SESSION_COOKIE}=${token}`,
+      'Path=/',
+      'HttpOnly',
+      'SameSite=Lax',
+      `Max-Age=${maxAge}`,
+      secureCookies && 'Secure',
+    ]
+      .filter(Boolean)
+      .join('; ');
   }
 
-  async function api(req, res, url) {
-    const parts = url.pathname.split('/').filter(Boolean); // ['api', 'calebs', ':n']
-    const method = req.method;
+  function startSession(res, member) {
+    res.setHeader('Set-Cookie', sessionCookie(store.createSession(db, member.id), SESSION_MAX_AGE));
+  }
 
-    if (parts[1] === 'stats' && parts.length === 2 && method === 'GET') {
-      return send(res, 200, store.stats(db));
-    }
+  function requireMember(ctx) {
+    if (!ctx.member) throw new HttpError(401, 'Please log in.');
+    return ctx.member;
+  }
 
-    if (parts[1] === 'spellings' && parts.length === 2 && method === 'GET') {
-      return send(res, 200, Object.values(store.SPELLINGS));
-    }
+  function requireVerified(ctx) {
+    const m = requireMember(ctx);
+    if (m.status !== 'verified') throw new HttpError(403, 'Your account is waiting for name verification.');
+    return m;
+  }
 
-    if (parts[1] !== 'calebs' || parts.length > 3) throw new HttpError(404, 'Not found.');
+  function requireAdmin(ctx) {
+    const m = requireVerified(ctx);
+    if (m.role !== 'admin') throw new HttpError(403, 'Admins only.');
+    return m;
+  }
 
-    if (parts.length === 2) {
-      if (method === 'GET') {
-        const p = url.searchParams;
-        const limit = Math.min(Math.max(parseInt(p.get('limit'), 10) || 50, 1), 200);
-        const offset = Math.max(parseInt(p.get('offset'), 10) || 0, 0);
-        return send(
-          res,
-          200,
-          store.list(db, {
-            q: p.get('q') || '',
-            spelling: p.get('spelling') || '',
-            country: p.get('country') || '',
-            sort: p.get('sort') || 'number',
-            limit,
-            offset,
-          })
-        );
+  function validated({ value, errors }) {
+    if (errors) throw new HttpError(422, 'Please fix the highlighted fields.', errors);
+    return value;
+  }
+
+  const routes = {
+    'GET /api/spellings': () => Object.values(store.SPELLINGS),
+
+    'POST /api/auth/register': async (ctx) => {
+      if (!registerLimit(ctx.ip)) throw new HttpError(429, 'Too many sign-ups from here. Try again later.');
+      const body = ctx.body;
+      if (body.website_confirm) throw new HttpError(400, 'Registration rejected.'); // honeypot field
+      const credentials = validated(store.validateCredentials(body));
+      const profile = validated(store.validateProfile(body));
+      let member;
+      try {
+        member = await store.createMember(db, credentials, profile);
+      } catch (err) {
+        if (err instanceof store.DuplicateUsername) throw new HttpError(409, 'That username is taken.');
+        throw err;
       }
-      if (method === 'POST') {
-        const ip = req.socket.remoteAddress || 'unknown';
-        if (!allowRegistration(ip)) throw new HttpError(429, 'Too many registrations from here. Try again later.');
-        const body = await readJson(req);
-        if (body.website_confirm) throw new HttpError(400, 'Registration rejected.'); // honeypot field
-        const { value, errors } = store.validate(body);
-        if (errors) throw new HttpError(422, 'Please fix the highlighted fields.', errors);
-        const { caleb, token } = store.register(db, value);
-        return send(res, 201, { caleb, token }, { Location: `/api/calebs/${caleb.number}` });
-      }
-      throw new HttpError(405, 'Method not allowed.');
-    }
+      startSession(ctx.res, member);
+      return new Reply(201, { member });
+    },
 
-    const number = parseNumber(parts[2]);
-    if (method === 'GET') {
-      const caleb = store.get(db, number);
+    'POST /api/auth/login': async (ctx) => {
+      const { username, password } = ctx.body;
+      const key = `${ctx.ip}|${String(username ?? '').toLowerCase()}`;
+      if (!loginLimit(key)) throw new HttpError(429, 'Too many login attempts. Try again in a few minutes.');
+      const member = await store.authenticate(db, username, password);
+      if (!member) throw new HttpError(401, 'Wrong username or password.');
+      startSession(ctx.res, member);
+      return { member };
+    },
+
+    'POST /api/auth/logout': (ctx) => {
+      store.endSession(db, ctx.token);
+      ctx.res.setHeader('Set-Cookie', sessionCookie('', 0));
+      return { ok: true };
+    },
+
+    'GET /api/me': (ctx) => ({ member: requireMember(ctx) }),
+
+    'PATCH /api/me': (ctx) => {
+      const m = requireMember(ctx);
+      const value = validated(store.validateProfile(ctx.body, { partial: true }));
+      const updated = store.updateProfile(db, m.id, value);
+      if (m.status === 'rejected') store.resubmit(db, m.id);
+      return { member: store.account(db, updated.id) };
+    },
+
+    'POST /api/me/password': async (ctx) => {
+      const m = requireMember(ctx);
+      const { current_password, new_password } = ctx.body;
+      const row = await store.authenticate(db, m.username, current_password);
+      if (!row) throw new HttpError(403, 'Your current password is incorrect.');
+      const problem = store.validatePassword(new_password);
+      if (problem) throw new HttpError(422, 'Please fix the highlighted fields.', [problem.replace('password', 'new_password')]);
+      await store.setPassword(db, m.id, new_password);
+      store.endOtherSessions(db, m.id, ctx.token);
+      return { ok: true };
+    },
+
+    'DELETE /api/me': async (ctx) => {
+      const m = requireMember(ctx);
+      if (!(await store.authenticate(db, m.username, ctx.body.password))) {
+        throw new HttpError(403, 'Your password is incorrect.');
+      }
+      if (m.role === 'admin') throw new HttpError(400, 'The admin account cannot be deleted here.');
+      store.removeMember(db, m.id);
+      ctx.res.setHeader('Set-Cookie', sessionCookie('', 0));
+      return { ok: true };
+    },
+
+    'GET /api/calebs': (ctx) => {
+      requireVerified(ctx);
+      const p = ctx.url.searchParams;
+      return store.list(db, {
+        q: p.get('q') || '',
+        spelling: p.get('spelling') || '',
+        country: p.get('country') || '',
+        sort: p.get('sort') || 'number',
+        limit: Math.min(Math.max(parseInt(p.get('limit'), 10) || 50, 1), 200),
+        offset: Math.max(parseInt(p.get('offset'), 10) || 0, 0),
+      });
+    },
+
+    'GET /api/calebs/:n': (ctx) => {
+      requireVerified(ctx);
+      const caleb = store.get(db, parseNumber(ctx.param));
       if (!caleb) throw new HttpError(404, 'No such Caleb.');
-      return send(res, 200, caleb);
+      return caleb;
+    },
+
+    'DELETE /api/calebs/:n': (ctx) => {
+      const admin = requireAdmin(ctx);
+      const id = store.idForNumber(db, parseNumber(ctx.param));
+      if (!id) throw new HttpError(404, 'No such Caleb.');
+      if (id === admin.id) throw new HttpError(400, 'You cannot remove your own account here.');
+      store.removeMember(db, id);
+      return new Reply(204);
+    },
+
+    'GET /api/stats': (ctx) => {
+      requireVerified(ctx);
+      return store.stats(db);
+    },
+
+    'GET /api/admin/pending': (ctx) => {
+      requireAdmin(ctx);
+      return { applicants: store.pending(db) };
+    },
+
+    'POST /api/admin/members/:n/verify': (ctx) => {
+      requireAdmin(ctx);
+      const member = store.verify(db, parseNumber(ctx.param));
+      if (!member) throw new HttpError(404, 'No such applicant.');
+      return { member };
+    },
+
+    'POST /api/admin/members/:n/reject': (ctx) => {
+      requireAdmin(ctx);
+      const member = store.reject(db, parseNumber(ctx.param), ctx.body.reason);
+      if (!member) throw new HttpError(404, 'No pending applicant with that id.');
+      return { member };
+    },
+  };
+
+  function route(method, pathname) {
+    const parts = pathname.split('/');
+    for (const [key, handler] of Object.entries(routes)) {
+      const [m, pattern] = key.split(' ');
+      if (m !== method) continue;
+      const pp = pattern.split('/');
+      if (pp.length !== parts.length) continue;
+      let param;
+      if (pp.every((seg, i) => (seg === ':n' ? ((param = parts[i]), true) : seg === parts[i]))) {
+        return { handler, param };
+      }
     }
-    if (method === 'PATCH') {
-      authorize(req, number);
-      const body = await readJson(req);
-      const { value, errors } = store.validate(body, { partial: true });
-      if (errors) throw new HttpError(422, 'Please fix the highlighted fields.', errors);
-      return send(res, 200, store.update(db, number, value));
+    return null;
+  }
+
+  async function api(ctx) {
+    const { req, res } = ctx;
+    const found = route(req.method, ctx.url.pathname);
+    if (!found) throw new HttpError(404, 'Not found.');
+    ctx.param = found.param;
+    if (req.method !== 'GET') {
+      // Requiring a JSON content type blocks cross-site form posts (CSRF).
+      if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+        throw new HttpError(415, 'Requests must be sent as application/json.');
+      }
+      ctx.body = await readJson(req);
     }
-    if (method === 'DELETE') {
-      authorize(req, number);
-      if (!store.remove(db, number)) throw new HttpError(404, 'No such Caleb.');
+    const result = await found.handler(ctx);
+    const { status, body } = result instanceof Reply ? result : new Reply(200, result);
+    if (status === 204) {
       res.writeHead(204);
       return res.end();
     }
-    throw new HttpError(405, 'Method not allowed.');
+    return send(res, status, body);
   }
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
-      if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+      const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+      const ctx = {
+        req,
+        res,
+        url,
+        token,
+        member: store.sessionMember(db, token),
+        ip: req.socket.remoteAddress || 'unknown',
+      };
+      if (url.pathname.startsWith('/api/')) return await api(ctx);
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
-      return serveStatic(req, res, url.pathname);
+      return serveStatic(req, res, url.pathname, ctx.member);
     } catch (err) {
       if (!(err instanceof HttpError)) console.error(err);
       const status = err instanceof HttpError ? err.status : 500;
@@ -197,10 +395,21 @@ function createServer({ db, adminToken = process.env.ADMIN_TOKEN, registerLimit 
 }
 
 if (require.main === module) {
-  const port = Number(process.env.PORT) || 3000;
-  const db = store.open(process.env.DATABASE_PATH || path.join(__dirname, '..', 'calebs.db'));
-  createServer({ db }).listen(port, () => {
-    console.log(`Caleb Index listening on http://localhost:${port}`);
+  (async () => {
+    const port = Number(process.env.PORT) || 3000;
+    const db = store.open(process.env.DATABASE_PATH || path.join(__dirname, '..', 'calebs.db'));
+    if (process.env.ADMIN_USERNAME) {
+      const admin = await store.ensureAdmin(db, process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD);
+      console.log(`Admin account: ${admin.username}`);
+    } else {
+      console.warn('ADMIN_USERNAME is not set: nobody will be able to verify new members.');
+    }
+    createServer({ db }).listen(port, () => {
+      console.log(`Caleb Index listening on http://localhost:${port}`);
+    });
+  })().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
   });
 }
 

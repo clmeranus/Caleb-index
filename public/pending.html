@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your application · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap" id="main"><p class="note">Loading…</p></main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const main = document.getElementById('main');
+
+    function render(m) {
+      if (m.status === 'verified') {
+        location.href = '/';
+        return;
+      }
+      const rejected = m.status === 'rejected';
+      const out = el('div');
+      const form = el('form', { class: 'register', novalidate: true },
+        ...profileFields(m),
+        field(VERIFICATION_FIELD, m.verification_note),
+        out,
+        el('div', {}, el('button', { class: 'btn', type: 'submit' }, rejected ? 'Resubmit application' : 'Update application'))
+      );
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          const { member } = await api('/api/me', { method: 'PATCH', body: Object.fromEntries(new FormData(form)) });
+          render(member);
+          main.prepend(noticeBox(rejected ? 'Your application has been resubmitted for review.' : 'Your application has been updated.'));
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      });
+
+      main.replaceChildren(
+        el('span', { class: `status ${m.status}` }, rejected ? 'Not approved' : 'Awaiting verification'),
+        el('h1', { style: 'margin-top:12px' }, rejected ? 'Your application was not approved' : 'Thanks for applying, ' + m.spelling),
+        rejected
+          ? el('div', {},
+              el('p', { class: 'lede' }, 'A reviewer could not confirm your name from the details you gave.'),
+              m.review_note && el('div', { class: 'panel' }, el('strong', {}, 'Reviewer’s note: '), m.review_note),
+              el('p', { class: 'lede', style: 'margin-top:16px' }, 'You can add more detail below and resubmit.')
+            )
+          : el('p', { class: 'lede' },
+              'A reviewer will check your application. Once your name is verified, you’ll get your Caleb Number and full access to the Index. ',
+              'Log in again any time to check your status. You can still edit your application below.'
+            ),
+        el('h2', {}, 'Your application'),
+        form
+      );
+    }
+
+    initNav('/pending').then((m) => (m ? render(m) : (location.href = '/login')));
+  </script>
+</body>
+</html>

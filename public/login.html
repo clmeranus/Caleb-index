@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site"><a href="/register">Apply to join</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap narrow">
+    <h1>Members only</h1>
+    <p class="lede">The Caleb Index is a private register of verified Calebs. Log in to browse it.</p>
+
+    <form class="register" id="login">
+      <div id="out"></div>
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" required autocomplete="username" autofocus>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required autocomplete="current-password">
+      </div>
+      <div><button class="btn" type="submit">Log in</button></div>
+      <p class="note-inline">Named Caleb but not a member yet? <a href="/register">Apply to join</a>.</p>
+    </form>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const form = document.getElementById('login');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const button = form.querySelector('button');
+      button.disabled = true;
+      try {
+        const { member } = await api('/api/auth/login', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
+        const next = new URLSearchParams(location.search).get('next');
+        const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+        location.href = member.status === 'verified' ? safeNext : '/pending';
+      } catch (err) {
+        document.getElementById('out').replaceChildren(errorBox(err));
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

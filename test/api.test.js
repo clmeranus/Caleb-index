@@ -3,119 +3,230 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const store = require('../src/db');
-const { createServer } = require('../src/server');
+const { createServer, rateLimiter } = require('../src/server');
 
 let server;
 let base;
+let db;
+let admin;
 
 before(async () => {
-  server = createServer({ db: store.open(), adminToken: 'admin-secret', registerLimit: () => true });
+  db = store.open();
+  await store.ensureAdmin(db, 'admin', 'admin-password-123');
+  server = createServer({ db, registerLimit: () => true, loginLimit: () => true });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}`;
+  admin = await login('admin', 'admin-password-123');
 });
 
 after(() => server.close());
 
-async function call(path, { method = 'GET', body, token } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['X-Edit-Token'] = token;
-  const res = await fetch(base + path, { method, headers, body: body && JSON.stringify(body) });
-  const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
+// A minimal client that keeps the session cookie between requests.
+function client() {
+  let cookie = '';
+  const call = async (path, { method = 'GET', body } = {}) => {
+    const headers = {};
+    if (cookie) headers.Cookie = cookie;
+    if (method !== 'GET') headers['Content-Type'] = 'application/json';
+    const res = await fetch(base + path, {
+      method,
+      headers,
+      redirect: 'manual',
+      body: method !== 'GET' ? JSON.stringify(body || {}) : undefined,
+    });
+    const set = res.headers.get('set-cookie');
+    if (set) cookie = set.split(';')[0].endsWith('=') ? '' : set.split(';')[0];
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    return { status: res.status, body: json, text, location: res.headers.get('location') };
+  };
+  return call;
 }
 
-test('registers a Caleb and assigns sequential numbers', async () => {
-  const a = await call('/api/calebs', { method: 'POST', body: { first_name: 'caleb', surname: 'Smith', country: 'USA' } });
-  assert.equal(a.status, 201);
-  assert.equal(a.body.caleb.spelling, 'Caleb');
-  assert.equal(a.body.caleb.surname, 'Smith');
-  assert.ok(a.body.token);
-  assert.equal(a.body.caleb.token_hash, undefined);
-
-  const b = await call('/api/calebs', { method: 'POST', body: { first_name: 'Kaleb', birth_year: 1990 } });
-  assert.equal(b.body.caleb.number, a.body.caleb.number + 1);
-  assert.equal(b.body.caleb.spelling, 'Kaleb');
-});
-
-test('rejects people who are not named Caleb', async () => {
-  const res = await call('/api/calebs', { method: 'POST', body: { first_name: 'Joshua' } });
-  assert.equal(res.status, 422);
-  assert.match(res.body.details[0], /first_name/);
-});
-
-test('validates field lengths, years and websites', async () => {
-  const res = await call('/api/calebs', {
+let seq = 0;
+async function apply(fields = {}) {
+  const call = client();
+  const username = fields.username || `caleb${++seq}`;
+  const res = await call('/api/auth/register', {
     method: 'POST',
-    body: { first_name: 'Caleb', bio: 'x'.repeat(501), birth_year: 1800, website: 'javascript:alert(1)' },
+    body: { username, password: 'correct-horse-battery', first_name: 'Caleb', verification_note: 'linkedin.com/in/me', ...fields },
   });
-  assert.equal(res.status, 422);
-  assert.equal(res.body.details.length, 3);
+  return { call, res, username };
+}
+
+async function login(username, password) {
+  const call = client();
+  const res = await call('/api/auth/login', { method: 'POST', body: { username, password } });
+  assert.equal(res.status, 200, res.text);
+  return call;
+}
+
+async function verified(fields) {
+  const a = await apply(fields);
+  const v = await admin(`/api/admin/members/${a.res.body.member.id}/verify`, { method: 'POST' });
+  assert.equal(v.status, 200, v.text);
+  return { ...a, number: v.body.member.number };
+}
+
+test('pages are locked to logged-in members', async () => {
+  const guest = client();
+  for (const page of ['/', '/stats', '/caleb?n=1', '/account', '/admin']) {
+    const res = await guest(page);
+    assert.equal(res.status, 303, page);
+    assert.match(res.location, /^\/login/);
+  }
+  assert.equal((await guest('/login')).status, 200);
+  assert.equal((await guest('/register')).status, 200);
+  assert.equal((await guest('/style.css')).status, 200);
+  assert.equal((await guest('/api/calebs')).status, 401);
+  assert.equal((await guest('/api/stats')).status, 401);
+  const spellings = await guest('/api/spellings');
+  assert.equal(spellings.status, 200);
+  assert.ok(spellings.body.includes('Kaleb'));
 });
 
-test('rejects the honeypot field', async () => {
-  const res = await call('/api/calebs', { method: 'POST', body: { first_name: 'Caleb', website_confirm: 'spam' } });
-  assert.equal(res.status, 400);
+test('signing up creates a pending account that cannot see the index', async () => {
+  const { call, res } = await apply({ surname: 'Pending' });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.member.status, 'pending');
+  assert.equal(res.body.member.number, null);
+  assert.equal(res.body.member.password_hash, undefined);
+
+  assert.equal((await call('/api/calebs')).status, 403);
+  assert.equal((await call('/')).location, '/pending');
+  assert.equal((await call('/pending')).status, 200);
+  assert.equal((await call('/login')).location, '/pending');
 });
 
-test('lists, searches and filters', async () => {
-  await call('/api/calebs', { method: 'POST', body: { first_name: 'Calev', location: 'Haifa', country: 'Israel' } });
-  const all = await call('/api/calebs');
-  assert.ok(all.body.total >= 3);
+test('sign-up validation', async () => {
+  const notCaleb = await apply({ first_name: 'Joshua' });
+  assert.equal(notCaleb.res.status, 422);
 
-  const search = await call('/api/calebs?q=haifa');
-  assert.equal(search.body.total, 1);
-  assert.equal(search.body.calebs[0].spelling, 'Calev');
+  const noEvidence = await apply({ verification_note: '' });
+  assert.equal(noEvidence.res.status, 422);
+  assert.match(noEvidence.res.body.details.join(), /verification_note/);
 
-  const bySpelling = await call('/api/calebs?spelling=Kaleb');
-  assert.ok(bySpelling.body.calebs.every((c) => c.spelling === 'Kaleb'));
+  const weak = await apply({ password: 'short' });
+  assert.equal(weak.res.status, 422);
 
-  const wildcard = await call('/api/calebs?q=%25');
-  assert.equal(wildcard.body.total, 0);
+  const badName = await apply({ username: 'no spaces!' });
+  assert.equal(badName.res.status, 422);
+
+  const honeypot = await apply({ website_confirm: 'spam' });
+  assert.equal(honeypot.res.status, 400);
+
+  await apply({ username: 'TakenName' });
+  const dup = await apply({ username: 'takenname' });
+  assert.equal(dup.res.status, 409);
 });
 
-test('edits and deletes with the edit token only', async () => {
-  const { body } = await call('/api/calebs', { method: 'POST', body: { first_name: 'Caleb', occupation: 'Baker' } });
-  const n = body.caleb.number;
+test('login, logout and wrong passwords', async () => {
+  const { username } = await apply();
+  const call = client();
+  assert.equal((await call('/api/auth/login', { method: 'POST', body: { username, password: 'wrong-password' } })).status, 401);
+  assert.equal((await call('/api/auth/login', { method: 'POST', body: { username: 'nobody', password: 'whatever' } })).status, 401);
 
-  assert.equal((await call(`/api/calebs/${n}`, { method: 'PATCH', body: { occupation: 'Chef' } })).status, 401);
-  assert.equal((await call(`/api/calebs/${n}`, { method: 'PATCH', body: { occupation: 'Chef' }, token: 'wrong' })).status, 403);
-
-  const edited = await call(`/api/calebs/${n}`, { method: 'PATCH', body: { occupation: 'Chef', birth_year: '' }, token: body.token });
-  assert.equal(edited.status, 200);
-  assert.equal(edited.body.occupation, 'Chef');
-  assert.equal(edited.body.birth_year, null);
-
-  const badRename = await call(`/api/calebs/${n}`, { method: 'PATCH', body: { first_name: 'Bob' }, token: body.token });
-  assert.equal(badRename.status, 422);
-
-  assert.equal((await call(`/api/calebs/${n}`, { method: 'DELETE', token: body.token })).status, 204);
-  assert.equal((await call(`/api/calebs/${n}`)).status, 404);
-});
-
-test('admin token can remove any entry', async () => {
-  const { body } = await call('/api/calebs', { method: 'POST', body: { first_name: 'Caleb' } });
-  const res = await call(`/api/calebs/${body.caleb.number}`, { method: 'DELETE', token: 'admin-secret' });
-  assert.equal(res.status, 204);
-});
-
-test('reports statistics', async () => {
-  const res = await call('/api/stats');
+  const res = await call('/api/auth/login', { method: 'POST', body: { username: username.toUpperCase(), password: 'correct-horse-battery' } });
   assert.equal(res.status, 200);
-  assert.ok(res.body.total >= 3);
-  assert.ok(res.body.bySpelling.some((r) => r.label === 'Calev'));
-  assert.deepEqual(res.body.byDecade.find((r) => r.label === 1990), { label: 1990, n: 1 });
+  assert.equal((await call('/api/me')).body.member.username, username);
+
+  await call('/api/auth/logout', { method: 'POST' });
+  assert.equal((await call('/api/me')).status, 401);
 });
 
-test('serves pages and blocks path traversal', async () => {
-  const home = await fetch(base + '/');
-  assert.equal(home.status, 200);
-  assert.match(await home.text(), /The Caleb Index/);
-  assert.equal((await fetch(base + '/register')).status, 200);
+test('admin verifies applicants and Caleb Numbers follow approval order', async () => {
+  const first = await apply({ surname: 'First' });
+  const second = await apply({ surname: 'Second', first_name: 'Kaleb' });
+
+  const queue = await admin('/api/admin/pending');
+  assert.ok(queue.body.applicants.some((a) => a.username === first.username && a.verification_note));
+
+  const v2 = await admin(`/api/admin/members/${second.res.body.member.id}/verify`, { method: 'POST' });
+  const v1 = await admin(`/api/admin/members/${first.res.body.member.id}/verify`, { method: 'POST' });
+  assert.equal(v1.body.member.number, v2.body.member.number + 1);
+
+  const list = await second.call('/api/calebs?q=Second');
+  assert.equal(list.status, 200);
+  assert.equal(list.body.total, 1);
+  assert.equal(list.body.calebs[0].spelling, 'Kaleb');
+  assert.equal(list.body.calebs[0].username, undefined);
+  assert.equal(list.body.calebs[0].verification_note, undefined);
+  assert.equal((await second.call('/')).status, 200);
+});
+
+test('rejected applicants see the reason and can resubmit', async () => {
+  const a = await apply({ verification_note: 'trust me' });
+  const r = await admin(`/api/admin/members/${a.res.body.member.id}/reject`, { method: 'POST', body: { reason: 'Need a link' } });
+  assert.equal(r.body.member.status, 'rejected');
+
+  const me = await a.call('/api/me');
+  assert.equal(me.body.member.review_note, 'Need a link');
+
+  const resubmitted = await a.call('/api/me', { method: 'PATCH', body: { verification_note: 'https://example.com/me' } });
+  assert.equal(resubmitted.body.member.status, 'pending');
+  assert.equal(resubmitted.body.member.review_note, '');
+});
+
+test('only admins can review and remove members', async () => {
+  const member = await verified();
+  const applicant = await apply();
+  assert.equal((await member.call('/api/admin/pending')).status, 403);
+  assert.equal((await member.call(`/api/admin/members/${applicant.res.body.member.id}/verify`, { method: 'POST' })).status, 403);
+  assert.equal((await member.call('/admin')).location, '/');
+  assert.equal((await admin('/admin')).status, 200);
+
+  const target = await verified();
+  assert.equal((await member.call(`/api/calebs/${target.number}`, { method: 'DELETE' })).status, 403);
+  assert.equal((await admin(`/api/calebs/${target.number}`, { method: 'DELETE' })).status, 204);
+  assert.equal((await member.call(`/api/calebs/${target.number}`)).status, 404);
+  assert.equal((await target.call('/api/me')).status, 401);
+});
+
+test('members edit their listing, change password and delete their account', async () => {
+  const m = await verified({ occupation: 'Baker' });
+  const edited = await m.call('/api/me', { method: 'PATCH', body: { occupation: 'Chef', birth_year: '' } });
+  assert.equal(edited.body.member.occupation, 'Chef');
+  assert.equal(edited.body.member.birth_year, null);
+  assert.equal((await m.call('/api/me', { method: 'PATCH', body: { first_name: 'Bob' } })).status, 422);
+  assert.equal((await m.call('/api/me', { method: 'PATCH', body: { status: 'verified', role: 'admin' } })).body.member.role, 'member');
+
+  const otherDevice = await login(m.username, 'correct-horse-battery');
+  assert.equal((await m.call('/api/me/password', { method: 'POST', body: { current_password: 'nope', new_password: 'another-long-pass' } })).status, 403);
+  assert.equal((await m.call('/api/me/password', { method: 'POST', body: { current_password: 'correct-horse-battery', new_password: 'another-long-pass' } })).status, 200);
+  assert.equal((await otherDevice('/api/me')).status, 401);
+  assert.equal((await m.call('/api/me')).status, 200);
+
+  assert.equal((await m.call('/api/me', { method: 'DELETE', body: { password: 'wrong' } })).status, 403);
+  assert.equal((await m.call('/api/me', { method: 'DELETE', body: { password: 'another-long-pass' } })).status, 200);
+  assert.equal((await client()('/api/auth/login', { method: 'POST', body: { username: m.username, password: 'another-long-pass' } })).status, 401);
+});
+
+test('search, filters and statistics only include verified members', async () => {
+  await verified({ first_name: 'Calev', location: 'Haifa', country: 'Israel', birth_year: 1990 });
+  await apply({ location: 'Haifa' });
+  const search = await admin('/api/calebs?q=haifa');
+  assert.equal(search.body.total, 1);
+  assert.equal((await admin('/api/calebs?q=%25')).body.total, 0);
+
+  const stats = await admin('/api/stats');
+  assert.ok(stats.body.bySpelling.some((r) => r.label === 'Calev'));
+  assert.deepEqual(stats.body.byDecade.find((r) => r.label === 1990), { label: 1990, n: 1 });
+  assert.equal(stats.body.total, (await admin('/api/calebs')).body.total);
+});
+
+test('rejects non-JSON writes, unknown pages and path traversal', async () => {
+  const res = await fetch(base + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'username=admin&password=admin-password-123',
+  });
+  assert.equal(res.status, 415);
   assert.equal((await fetch(base + '/..%2fpackage.json')).status, 404);
+  assert.equal((await fetch(base + '/nope')).status, 404);
 });
 
-test('rate limits registrations', async () => {
-  const { rateLimiter } = require('../src/server');
+test('rate limiter', () => {
   const allow = rateLimiter({ max: 2, windowMs: 60_000 });
   assert.equal(allow('ip'), true);
   assert.equal(allow('ip'), true);

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your account · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap" id="main"><p class="note">Loading…</p></main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const main = document.getElementById('main');
+
+    function profileSection(m) {
+      const out = el('div');
+      const form = el('form', { class: 'register', novalidate: true }, ...profileFields(m), out,
+        el('div', {}, el('button', { class: 'btn', type: 'submit' }, 'Save listing')));
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          await api('/api/me', { method: 'PATCH', body: Object.fromEntries(new FormData(form)) });
+          out.replaceChildren(noticeBox('Your listing has been saved.'));
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      });
+      return form;
+    }
+
+    function passwordSection() {
+      const out = el('div');
+      const form = el('form', { class: 'register' },
+        el('div', { class: 'field' },
+          el('label', { for: 'current_password' }, 'Current password'),
+          el('input', { id: 'current_password', name: 'current_password', type: 'password', required: true, autocomplete: 'current-password' })),
+        el('div', { class: 'row' },
+          el('div', { class: 'field' },
+            el('label', { for: 'new_password' }, 'New password'),
+            el('input', { id: 'new_password', name: 'new_password', type: 'password', required: true, minlength: 10, autocomplete: 'new-password' })),
+          el('div', { class: 'field' },
+            el('label', { for: 'new_password_confirm' }, 'Confirm new password'),
+            el('input', { id: 'new_password_confirm', name: 'new_password_confirm', type: 'password', required: true, autocomplete: 'new-password' }))),
+        out,
+        el('div', {}, el('button', { class: 'btn', type: 'submit' }, 'Change password')));
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const { new_password_confirm, ...body } = Object.fromEntries(new FormData(form));
+        if (body.new_password !== new_password_confirm) {
+          out.replaceChildren(errorBox(new Error('The two new passwords do not match.')));
+          return;
+        }
+        try {
+          await api('/api/me/password', { method: 'POST', body });
+          form.reset();
+          out.replaceChildren(noticeBox('Password changed. Any other devices have been logged out.'));
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      });
+      return form;
+    }
+
+    function deleteSection() {
+      const out = el('div');
+      const form = el('form', { class: 'register' },
+        el('p', { class: 'hint', style: 'margin:0' }, 'This permanently removes your account and listing. Your Caleb Number will not be reissued.'),
+        el('div', { class: 'field' },
+          el('label', { for: 'delete_password' }, 'Confirm with your password'),
+          el('input', { id: 'delete_password', name: 'password', type: 'password', required: true, autocomplete: 'current-password' })),
+        out,
+        el('div', {}, el('button', { class: 'btn danger', type: 'submit' }, 'Delete my account')));
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!confirm('Delete your account permanently?')) return;
+        try {
+          await api('/api/me', { method: 'DELETE', body: Object.fromEntries(new FormData(form)) });
+          location.href = '/login';
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      });
+      return form;
+    }
+
+    initNav('/account').then((m) => {
+      if (!m) return (location.href = '/login');
+      main.replaceChildren(...[
+        el('h1', {}, 'Your account'),
+        el('p', { class: 'lede' },
+          `Logged in as ${m.username}. `,
+          m.number && el('a', { href: `/caleb?n=${m.number}` }, `View your listing (${calebNumber(m.number)})`)),
+        m.spelling && [el('h2', {}, 'Your listing'), profileSection(m)],
+        el('h2', {}, 'Password'),
+        passwordSection(),
+        m.role !== 'admin' && [el('h2', {}, 'Delete account'), deleteSection()],
+      ].flat().filter(Boolean));
+    });
+  </script>
+</body>
+</html>

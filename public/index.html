@@ -12,11 +12,7 @@
   <header class="site">
     <div class="wrap">
       <a class="brand" href="/">The <span>Caleb</span> Index</a>
-      <nav class="site">
-        <a href="/" aria-current="page">Index</a>
-        <a href="/stats">Statistics</a>
-        <a href="/register">Register</a>
-      </nav>
+      <nav class="site" id="nav"></nav>
     </div>
   </header>
 
@@ -24,13 +20,12 @@
     <section class="hero">
       <div>
         <h1>Every Caleb, accounted for.</h1>
-        <p class="lede">The Caleb Index is a public register of people named Caleb (and Kaleb, Calev, and other spellings).
-          Each registrant gets a permanent Caleb Number, in order of sign-up.</p>
-        <a class="btn" href="/register">Register as a Caleb</a>
+        <p class="lede">The Caleb Index is a members-only register of people named Caleb (and Kaleb, Calev, and other spellings).
+          Every member's name has been verified, and each has a permanent Caleb Number, in order of verification.</p>
       </div>
       <div class="counter">
         <strong id="total">–</strong>
-        <small>Calebs registered</small>
+        <small>verified Calebs</small>
       </div>
     </section>
 
@@ -51,7 +46,7 @@
     <div id="pager" class="pager"></div>
   </main>
 
-  <footer class="site"><div class="wrap">The Caleb Index · Entries are self-reported by the Calebs themselves.</div></footer>
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
 
   <script src="/common.js"></script>
   <script>
@@ -62,6 +57,7 @@
     let offset = 0;
     let timer;
 
+    initNav('/');
     api('/api/spellings').then((list) => {
       form.spelling.append(...list.map((s) => el('option', { value: s }, s)));
     });
@@ -77,7 +73,7 @@
         results.replaceChildren(
           ...(calebs.length
             ? calebs.map(calebCard)
-            : [el('p', { class: 'empty' }, filtered ? 'No Calebs match that search.' : 'No Calebs yet. Be the first!')])
+            : [el('p', { class: 'empty' }, filtered ? 'No Calebs match that search.' : 'No verified Calebs yet.')])
         );
         pager.replaceChildren(...[
           offset > 0 && el('button', { class: 'btn ghost', onclick: () => { offset -= PAGE_SIZE; load(); } }, '← Previous'),
