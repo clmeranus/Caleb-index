@@ -18,8 +18,13 @@
   <main class="wrap">
     <h1>Apply to join</h1>
     <p class="lede">Membership is open to people named Caleb (or Kaleb, Calev and similar spellings).
-      A reviewer checks every application before it's approved. Once you're verified, you get your
-      Caleb Number and access to the Index.</p>
+      Every name is verified before you get your Caleb Number and access to the Index. After you apply, you can
+      get verified in any of these ways:</p>
+    <ul class="paths" id="paths">
+      <li><strong>ID check:</strong> scan your ID and a selfie for instant approval.</li>
+      <li><strong>Vouching:</strong> <span id="vouch-n">two</span> verified members who know you vouch for you.</li>
+      <li><strong>Admin review:</strong> an admin checks the evidence you give below.</li>
+    </ul>
 
     <form class="register" id="register" novalidate>
       <h2 class="form-section">Your account</h2>
@@ -41,7 +46,7 @@
       </div>
 
       <h2 class="form-section">Your listing</h2>
-      <p class="hint" style="margin:-8px 0 0">Every verified member can see these details.</p>
+      <p class="hint" style="margin:-8px 0 0">Verified members can see these details, including while your application is open, so people who know you can vouch for you.</p>
       <div id="profile"></div>
 
       <h2 class="form-section">Name verification</h2>
@@ -64,6 +69,10 @@
     const out = document.getElementById('out');
     document.getElementById('profile').replaceWith(...profileFields());
     document.getElementById('verification').replaceWith(field(VERIFICATION_FIELD));
+    api('/api/config').then((config) => {
+      document.getElementById('vouch-n').textContent = config.vouchesRequired;
+      if (!config.idCheck) document.querySelector('#paths li').remove();
+    });
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();

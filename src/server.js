@@ -4,9 +4,10 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./db');
+const { stripeIdentity, verifyWebhook } = require('./identity');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-const MAX_BODY = 16 * 1024;
+const MAX_BODY = 64 * 1024;
 const SESSION_COOKIE = 'sid';
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MIME = {
@@ -26,6 +27,7 @@ const PAGES = {
   '/stats': 'member',
   '/caleb': 'member',
   '/account': 'member',
+  '/applicants': 'member',
   '/admin': 'admin',
 };
 
@@ -75,7 +77,7 @@ function redirect(res, location) {
   res.end();
 }
 
-function readJson(req) {
+function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -88,17 +90,19 @@ function readJson(req) {
       }
       chunks.push(chunk);
     });
-    req.on('end', () => {
-      try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-        resolve(parsed);
-      } catch {
-        reject(new HttpError(400, 'Body must be a JSON object.'));
-      }
-    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+}
+
+function parseJson(raw) {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+    return parsed;
+  } catch {
+    throw new HttpError(400, 'Body must be a JSON object.');
+  }
 }
 
 function parseCookies(header = '') {
@@ -130,7 +134,7 @@ function pageRedirect(access, member, pathname) {
     case 'admin':
       if (!member) return '/login';
       if (!verified) return '/pending';
-      return member.role === 'admin' ? null : '/';
+      return store.isAdmin(member) ? null : '/';
     default:
       return null;
   }
@@ -168,6 +172,10 @@ function serveStatic(req, res, pathname, member) {
 function createServer({
   db,
   secureCookies = process.env.COOKIE_SECURE === '1',
+  vouchesRequired = Number(process.env.VOUCHES_REQUIRED) || 2,
+  identity = process.env.STRIPE_SECRET_KEY ? stripeIdentity({ secretKey: process.env.STRIPE_SECRET_KEY }) : null,
+  webhookSecret = process.env.STRIPE_WEBHOOK_SECRET,
+  publicUrl = process.env.PUBLIC_URL,
   registerLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
   loginLimit = rateLimiter({ max: 10, windowMs: 15 * 60 * 1000 }),
 } = {}) {
@@ -201,8 +209,35 @@ function createServer({
 
   function requireAdmin(ctx) {
     const m = requireVerified(ctx);
-    if (m.role !== 'admin') throw new HttpError(403, 'Admins only.');
+    if (!store.isAdmin(m)) throw new HttpError(403, 'Admins only.');
     return m;
+  }
+
+  function requireApplicant(ctx) {
+    const m = requireMember(ctx);
+    if (m.status === 'verified') throw new HttpError(400, 'Your name is already verified.');
+    return m;
+  }
+
+  // An account as its owner sees it, with vouching progress while they wait.
+  function me(member) {
+    return member.status === 'verified'
+      ? member
+      : { ...member, vouch_count: store.vouchCount(db, member.id), vouches_required: vouchesRequired };
+  }
+
+  function memberByNumber(raw) {
+    const id = store.idForNumber(db, parseNumber(raw));
+    const member = id && store.account(db, id);
+    if (!member || member.status !== 'verified') throw new HttpError(404, 'No such Caleb.');
+    return member;
+  }
+
+  async function refreshIdCheck(member) {
+    const row = db.prepare('SELECT id_check_session FROM members WHERE id = ?').get(member.id);
+    if (!identity || !row || !row.id_check_session) return member;
+    const result = await identity.getSession(row.id_check_session);
+    return store.recordIdCheck(db, member.id, result);
   }
 
   function validated({ value, errors }) {
@@ -212,6 +247,8 @@ function createServer({
 
   const routes = {
     'GET /api/spellings': () => Object.values(store.SPELLINGS),
+
+    'GET /api/config': () => ({ idCheck: Boolean(identity), vouchesRequired }),
 
     'POST /api/auth/register': async (ctx) => {
       if (!registerLimit(ctx.ip)) throw new HttpError(429, 'Too many sign-ups from here. Try again later.');
@@ -246,14 +283,14 @@ function createServer({
       return { ok: true };
     },
 
-    'GET /api/me': (ctx) => ({ member: requireMember(ctx) }),
+    'GET /api/me': (ctx) => ({ member: me(requireMember(ctx)) }),
 
     'PATCH /api/me': (ctx) => {
       const m = requireMember(ctx);
       const value = validated(store.validateProfile(ctx.body, { partial: true }));
       const updated = store.updateProfile(db, m.id, value);
       if (m.status === 'rejected') store.resubmit(db, m.id);
-      return { member: store.account(db, updated.id) };
+      return { member: me(store.account(db, updated.id)) };
     },
 
     'POST /api/me/password': async (ctx) => {
@@ -273,7 +310,7 @@ function createServer({
       if (!(await store.authenticate(db, m.username, ctx.body.password))) {
         throw new HttpError(403, 'Your password is incorrect.');
       }
-      if (m.role === 'admin') throw new HttpError(400, 'The admin account cannot be deleted here.');
+      if (m.role === 'owner') throw new HttpError(400, 'The owner account cannot be deleted.');
       store.removeMember(db, m.id);
       ctx.res.setHeader('Set-Cookie', sessionCookie('', 0));
       return { ok: true };
@@ -301,11 +338,73 @@ function createServer({
 
     'DELETE /api/calebs/:n': (ctx) => {
       const admin = requireAdmin(ctx);
-      const id = store.idForNumber(db, parseNumber(ctx.param));
-      if (!id) throw new HttpError(404, 'No such Caleb.');
-      if (id === admin.id) throw new HttpError(400, 'You cannot remove your own account here.');
-      store.removeMember(db, id);
+      const target = memberByNumber(ctx.param);
+      if (target.id === admin.id) throw new HttpError(400, 'You cannot remove your own account here.');
+      if (target.role === 'owner') throw new HttpError(403, 'The owner account cannot be removed.');
+      store.removeMember(db, target.id);
       return new Reply(204);
+    },
+
+    'PUT /api/calebs/:n/admin': (ctx) => {
+      const admin = requireAdmin(ctx);
+      const target = memberByNumber(ctx.param);
+      if (typeof ctx.body.admin !== 'boolean') throw new HttpError(422, 'admin must be true or false.');
+      if (target.id === admin.id) throw new HttpError(400, 'You cannot change your own admin permission.');
+      if (target.role === 'owner') throw new HttpError(403, "The owner's admin permission cannot be changed.");
+      const updated = store.setAdmin(db, target.id, ctx.body.admin);
+      return { number: updated.number, is_admin: store.isAdmin(updated) };
+    },
+
+    'GET /api/applicants': (ctx) => {
+      const m = requireVerified(ctx);
+      return { applicants: store.applicants(db, m.id), vouchesRequired };
+    },
+
+    'POST /api/applicants/:n/vouch': (ctx) => {
+      const m = requireVerified(ctx);
+      if (m.number === null) throw new HttpError(403, 'Only members with a Caleb listing can vouch.');
+      const applicant = store.vouch(db, parseNumber(ctx.param), m.id, vouchesRequired);
+      if (!applicant) throw new HttpError(404, 'No pending applicant with that id.');
+      return { verified: applicant.status === 'verified', vouch_count: store.vouchCount(db, applicant.id) };
+    },
+
+    'DELETE /api/applicants/:n/vouch': (ctx) => {
+      const m = requireVerified(ctx);
+      const applicant = store.unvouch(db, parseNumber(ctx.param), m.id);
+      if (!applicant) throw new HttpError(404, 'No pending applicant with that id.');
+      return { vouch_count: store.vouchCount(db, applicant.id) };
+    },
+
+    'POST /api/me/id-check': async (ctx) => {
+      const m = requireApplicant(ctx);
+      if (!identity) throw new HttpError(404, 'ID checks are not enabled on this site.');
+      const base = publicUrl || `http://${ctx.req.headers.host}`;
+      const session = await identity.createSession({ memberId: m.id, returnUrl: `${base}/pending?id_check=done` });
+      store.startIdCheck(db, m.id, session.id);
+      return { url: session.url };
+    },
+
+    'POST /api/me/id-check/refresh': async (ctx) => {
+      const m = requireMember(ctx);
+      return { member: me(await refreshIdCheck(m)) };
+    },
+
+    // Stripe calls this when an ID check finishes, so results arrive even if the
+    // member never comes back to the site.
+    'POST /api/webhooks/stripe': async (ctx) => {
+      if (!identity || !webhookSecret) throw new HttpError(404, 'Not found.');
+      let event;
+      try {
+        event = verifyWebhook(ctx.rawBody, ctx.req.headers['stripe-signature'], webhookSecret);
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
+      const session = event.data && event.data.object;
+      if (String(event.type).startsWith('identity.verification_session.') && session && session.id) {
+        const member = store.memberForIdSession(db, session.id);
+        if (member) await refreshIdCheck(member);
+      }
+      return { received: true };
     },
 
     'GET /api/stats': (ctx) => {
@@ -358,7 +457,8 @@ function createServer({
       if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
         throw new HttpError(415, 'Requests must be sent as application/json.');
       }
-      ctx.body = await readJson(req);
+      ctx.rawBody = await readBody(req);
+      ctx.body = parseJson(ctx.rawBody);
     }
     const result = await found.handler(ctx);
     const { status, body } = result instanceof Reply ? result : new Reply(200, result);

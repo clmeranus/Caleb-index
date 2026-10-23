@@ -39,17 +39,50 @@
       main.replaceChildren(
         el('article', { class: 'profile' },
           el('span', { class: 'badge' }, calebNumber(c.number)),
+          c.is_admin ? el('span', { class: 'badge admin' }, 'Admin') : '',
           el('h1', { style: 'margin-top:12px' }, fullName(c)),
           c.bio && el('p', { class: 'bio' }, c.bio),
           el('dl', {}, rows.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
           el('div', { class: 'actions' },
             el('a', { href: '/' }, '← Back to the Index'),
             isMe && el('a', { href: '/account' }, 'Edit your listing'),
-            me.role === 'admin' && !isMe &&
+            isAdmin(me) && !isMe && !c.is_owner &&
               el('button', { class: 'link danger', type: 'button', onclick: () => removeEntry(c, status) }, 'Remove from the Index')
           ),
+          isAdmin(me) && !isMe && !c.is_owner && adminToggle(c, status),
           status
         )
+      );
+    }
+
+    // Only admins see this, and only on other members' profiles.
+    function adminToggle(c, status) {
+      const box = el('input', { type: 'checkbox', id: 'is-admin' });
+      box.checked = Boolean(c.is_admin);
+      box.addEventListener('change', async () => {
+        const want = box.checked;
+        const verb = want ? 'Give' : 'Remove';
+        if (!confirm(`${verb} admin permission ${want ? 'to' : 'from'} ${fullName(c)}?`)) {
+          box.checked = !want;
+          return;
+        }
+        box.disabled = true;
+        try {
+          const res = await api(`/api/calebs/${c.number}/admin`, { method: 'PUT', body: { admin: want } });
+          render({ ...c, is_admin: res.is_admin }, me);
+          document.getElementById('main').querySelector('.profile').append(
+            noticeBox(res.is_admin ? `${fullName(c)} is now an admin.` : `${fullName(c)} is no longer an admin.`));
+        } catch (err) {
+          box.checked = !want;
+          box.disabled = false;
+          status.replaceChildren(errorBox(err));
+        }
+      });
+      return el('div', { class: 'admin-toggle panel' },
+        box,
+        el('label', { for: 'is-admin' },
+          el('strong', {}, 'Admin permission'),
+          el('div', { class: 'hint' }, 'Admins can review and verify new members, remove members, and give or remove admin permission.'))
       );
     }
 
@@ -63,7 +96,9 @@
       }
     }
 
-    initNav('/caleb').then(async (me) => {
+    let me;
+    initNav('/caleb').then(async (member) => {
+      me = member;
       if (!me) return (location.href = '/login');
       try {
         render(await api(`/api/calebs/${number}`), me);

@@ -53,7 +53,8 @@ async function initNav(current) {
       ? [
           ['/', 'Index'],
           ['/stats', 'Statistics'],
-          member.role === 'admin' && ['/admin', 'Review'],
+          ['/applicants', 'Applicants'],
+          isAdmin(member) && ['/admin', 'Review'],
           ['/account', 'Account'],
         ]
       : [['/pending', 'Application']];
@@ -64,6 +65,10 @@ async function initNav(current) {
     el('button', { class: 'link', type: 'button', onclick: logout }, 'Log out')
   );
   return member;
+}
+
+function isAdmin(member) {
+  return member.role === 'admin' || member.role === 'owner';
 }
 
 function fullName(c) {
@@ -115,10 +120,10 @@ const PROFILE_FIELDS = [
 
 const VERIFICATION_FIELD = {
   name: 'verification_note',
-  label: 'How can we verify your name? *',
-  hint: 'Only the reviewers see this. For example: a link to a public profile that shows your name (LinkedIn, a staff page, a club roster), or someone who can vouch for you. Please do not paste ID numbers.',
+  label: 'Evidence for the reviewers',
+  hint: 'Optional, and only admins see it. For example: a link to a public profile that shows your name (LinkedIn, a staff page, a club roster), or members who know you. Please do not paste ID numbers.',
   textarea: true,
-  attrs: { rows: 3, maxlength: 500, required: true },
+  attrs: { rows: 3, maxlength: 500 },
 };
 
 function field({ name, label, hint, textarea, attrs = {} }, value = '') {

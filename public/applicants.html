@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Applicants · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h1>Applicants</h1>
+    <p class="lede" id="intro">People waiting to join the Index. If you personally know one of them and know their name
+      really is Caleb, you can vouch for them.</p>
+    <div id="list" class="queue"><p class="note">Loading…</p></div>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const list = document.getElementById('list');
+    let required = 2;
+
+    function applicantCard(a) {
+      const out = el('div');
+      const count = el('p', { class: 'tag' });
+      const button = el('button', { type: 'button' });
+      const bar = el('span');
+      const showState = () => {
+        bar.style.width = `${Math.min(a.vouch_count / required, 1) * 100}%`;
+        count.textContent = `${a.vouch_count} of ${required} vouches`;
+        button.className = a.vouched_by_me ? 'btn ghost' : 'btn';
+        button.textContent = a.vouched_by_me ? 'Withdraw my vouch' : 'Vouch for them';
+      };
+      button.addEventListener('click', async () => {
+        if (!a.vouched_by_me && !confirm(`Vouch that you personally know ${fullName(a)} and that their name is ${a.spelling}?`)) return;
+        button.disabled = true;
+        try {
+          const res = await api(`/api/applicants/${a.id}/vouch`, { method: a.vouched_by_me ? 'DELETE' : 'POST' });
+          if (res.verified) {
+            card.replaceWith(noticeBox(`Thanks! With your vouch, ${fullName(a)} is now a verified member.`));
+            return;
+          }
+          a.vouched_by_me = !a.vouched_by_me;
+          a.vouch_count = res.vouch_count;
+          showState();
+          out.replaceChildren();
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+        button.disabled = false;
+      });
+      showState();
+
+      const details = [
+        ['Location', place(a)],
+        ['Born', a.birth_year],
+        ['Occupation', a.occupation],
+        ['Website', a.website && el('a', { href: a.website, target: '_blank', rel: 'noopener noreferrer nofollow' }, a.website)],
+        ['Applied', new Date(a.created_at).toLocaleDateString(undefined, { dateStyle: 'long' })],
+      ].filter(([, v]) => v);
+      const card = el('article', { class: 'panel applicant' },
+        el('h2', { style: 'margin-top:0' }, fullName(a)),
+        el('dl', {}, details.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+        a.bio && el('p', { class: 'bio' }, a.bio),
+        el('div', { class: 'progress' }, bar),
+        count,
+        out,
+        el('div', { class: 'actions' }, button)
+      );
+      return card;
+    }
+
+    initNav('/applicants').then(async (m) => {
+      if (!m) return (location.href = '/login');
+      try {
+        const res = await api('/api/applicants');
+        required = res.vouchesRequired;
+        document.getElementById('intro').append(
+          ` Once ${required} members vouch, they’re approved automatically. Only vouch for people you actually know: your name is recorded with every vouch.`
+        );
+        list.replaceChildren(
+          ...(res.applicants.length ? res.applicants.map(applicantCard) : [el('p', { class: 'empty' }, 'Nobody is waiting to join right now.')])
+        );
+      } catch (err) {
+        list.replaceChildren(errorBox(err));
+      }
+    });
+  </script>
+</body>
+</html>

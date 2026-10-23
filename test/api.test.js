@@ -4,6 +4,22 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const store = require('../src/db');
 const { createServer, rateLimiter } = require('../src/server');
+const { signWebhook, verifyWebhook } = require('../src/identity');
+
+const WEBHOOK_SECRET = 'whsec_test';
+
+// Stands in for Stripe Identity. Tests set the outcome of each session.
+const fakeIdentity = {
+  sessions: new Map(),
+  async createSession({ memberId, returnUrl }) {
+    const id = `vs_${memberId}_${this.sessions.size}`;
+    this.sessions.set(id, { status: 'requires_input', firstName: null, returnUrl });
+    return { id, url: `https://verify.stripe.test/${id}` };
+  },
+  async getSession(id) {
+    return { id, ...this.sessions.get(id) };
+  },
+};
 
 let server;
 let base;
@@ -13,7 +29,14 @@ let admin;
 before(async () => {
   db = store.open();
   await store.ensureAdmin(db, 'admin', 'admin-password-123');
-  server = createServer({ db, registerLimit: () => true, loginLimit: () => true });
+  server = createServer({
+    db,
+    registerLimit: () => true,
+    loginLimit: () => true,
+    vouchesRequired: 2,
+    identity: fakeIdentity,
+    webhookSecret: WEBHOOK_SECRET,
+  });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}`;
   admin = await login('admin', 'admin-password-123');
@@ -104,8 +127,7 @@ test('sign-up validation', async () => {
   assert.equal(notCaleb.res.status, 422);
 
   const noEvidence = await apply({ verification_note: '' });
-  assert.equal(noEvidence.res.status, 422);
-  assert.match(noEvidence.res.body.details.join(), /verification_note/);
+  assert.equal(noEvidence.res.status, 201, 'evidence is optional now that ID checks and vouching exist');
 
   const weak = await apply({ password: 'short' });
   assert.equal(weak.res.status, 422);
@@ -232,4 +254,153 @@ test('rate limiter', () => {
   assert.equal(allow('ip'), true);
   assert.equal(allow('ip'), false);
   assert.equal(allow('other'), true);
+});
+
+test('two vouches from verified members approve an applicant', async () => {
+  const a = await verified({ surname: 'VoucherA' });
+  const b = await verified({ surname: 'VoucherB' });
+  const applicant = await apply({ surname: 'Vouchee' });
+  const id = applicant.res.body.member.id;
+
+  // Pending applicants cannot vouch, and cannot see the applicant list.
+  const other = await apply();
+  assert.equal((await other.call(`/api/applicants/${id}/vouch`, { method: 'POST' })).status, 403);
+
+  const list = await a.call('/api/applicants');
+  const entry = list.body.applicants.find((x) => x.id === id);
+  assert.equal(entry.surname, 'Vouchee');
+  assert.equal(entry.username, undefined);
+  assert.equal(entry.verification_note, undefined);
+
+  const first = await a.call(`/api/applicants/${id}/vouch`, { method: 'POST' });
+  assert.deepEqual(first.body, { verified: false, vouch_count: 1 });
+  assert.equal((await a.call(`/api/applicants/${id}/vouch`, { method: 'POST' })).body.vouch_count, 1, 'vouching twice counts once');
+  assert.equal((await applicant.call('/api/me')).body.member.vouch_count, 1);
+
+  // Withdrawing and re-vouching works.
+  assert.equal((await a.call(`/api/applicants/${id}/vouch`, { method: 'DELETE' })).body.vouch_count, 0);
+  await a.call(`/api/applicants/${id}/vouch`, { method: 'POST' });
+
+  const admin_view = await admin('/api/admin/pending');
+  assert.equal(admin_view.body.applicants.find((x) => x.id === id).vouchers[0].surname, 'VoucherA');
+
+  const second = await b.call(`/api/applicants/${id}/vouch`, { method: 'POST' });
+  assert.equal(second.body.verified, true);
+  const me = (await applicant.call('/api/me')).body.member;
+  assert.equal(me.status, 'verified');
+  assert.equal(me.verification_method, 'vouch');
+  assert.ok(me.number);
+});
+
+test('the owner without a listing cannot vouch, and rejection clears vouches', async () => {
+  const applicant = await apply();
+  const id = applicant.res.body.member.id;
+  assert.equal((await admin(`/api/applicants/${id}/vouch`, { method: 'POST' })).status, 403);
+
+  const a = await verified();
+  await a.call(`/api/applicants/${id}/vouch`, { method: 'POST' });
+  await admin(`/api/admin/members/${id}/reject`, { method: 'POST', body: { reason: 'No' } });
+  assert.equal((await a.call(`/api/applicants/${id}/vouch`, { method: 'POST' })).status, 404, 'cannot vouch for a rejected applicant');
+
+  await applicant.call('/api/me', { method: 'PATCH', body: { verification_note: 'more detail' } });
+  assert.equal((await applicant.call('/api/me')).body.member.vouch_count, 0);
+});
+
+test('admins grant and remove admin permission from a profile', async () => {
+  const promoted = await verified({ surname: 'Promoted' });
+  const target = await verified({ surname: 'Target' });
+  const ownerNumber = null;
+
+  // Ordinary members cannot change permissions.
+  assert.equal((await promoted.call(`/api/calebs/${target.number}/admin`, { method: 'PUT', body: { admin: true } })).status, 403);
+
+  const grant = await admin(`/api/calebs/${promoted.number}/admin`, { method: 'PUT', body: { admin: true } });
+  assert.deepEqual(grant.body, { number: promoted.number, is_admin: true });
+  assert.equal((await promoted.call(`/api/calebs/${promoted.number}`)).body.is_admin, 1);
+
+  // The new admin can verify applicants and see the review page.
+  const applicant = await apply();
+  assert.equal((await promoted.call('/admin')).status, 200);
+  const v = await promoted.call(`/api/admin/members/${applicant.res.body.member.id}/verify`, { method: 'POST' });
+  assert.equal(v.body.member.status, 'verified');
+
+  // ...and can manage other members' permission, but not their own or the owner's.
+  assert.equal((await promoted.call(`/api/calebs/${target.number}/admin`, { method: 'PUT', body: { admin: true } })).status, 200);
+  assert.equal((await promoted.call(`/api/calebs/${promoted.number}/admin`, { method: 'PUT', body: { admin: false } })).status, 400);
+  assert.equal((await promoted.call(`/api/calebs/${target.number}/admin`, { method: 'PUT', body: { admin: 'yes' } })).status, 422);
+
+  const ownerId = db.prepare("SELECT id FROM members WHERE role = 'owner'").get().id;
+  db.prepare('UPDATE members SET spelling = ?, number = 9999 WHERE id = ?').run('Caleb', ownerId);
+  assert.equal((await promoted.call('/api/calebs/9999/admin', { method: 'PUT', body: { admin: false } })).status, 403);
+  assert.equal((await promoted.call('/api/calebs/9999', { method: 'DELETE' })).status, 403);
+  assert.equal((await promoted.call('/api/calebs/9999')).body.is_owner, 1);
+  db.prepare("UPDATE members SET spelling = '', number = ? WHERE id = ?").run(ownerNumber, ownerId);
+
+  // Removing the permission takes effect immediately.
+  await admin(`/api/calebs/${promoted.number}/admin`, { method: 'PUT', body: { admin: false } });
+  assert.equal((await promoted.call('/api/admin/pending')).status, 403);
+  assert.equal((await promoted.call('/admin')).location, '/');
+});
+
+test('a verified ID with an accepted first name approves instantly', async () => {
+  const applicant = await apply({ first_name: 'Caleb', surname: 'IdCheck' });
+  const start = await applicant.call('/api/me/id-check', { method: 'POST' });
+  assert.match(start.body.url, /^https:\/\/verify\.stripe\.test\//);
+  const sessionId = start.body.url.split('/').pop();
+  assert.match(fakeIdentity.sessions.get(sessionId).returnUrl, /\/pending\?id_check=done$/);
+  assert.equal((await applicant.call('/api/me')).body.member.id_check_status, 'started');
+
+  fakeIdentity.sessions.set(sessionId, { status: 'verified', firstName: 'Kaléb Andrew' });
+  const res = await applicant.call('/api/me/id-check/refresh', { method: 'POST' });
+  assert.equal(res.body.member.status, 'verified');
+  assert.equal(res.body.member.verification_method, 'id');
+  assert.equal(res.body.member.spelling, 'Kaleb', 'the listing takes the spelling from the ID');
+  assert.equal((await applicant.call('/api/me/id-check', { method: 'POST' })).status, 400);
+});
+
+test('an ID with a different first name goes to admin review', async () => {
+  const applicant = await apply();
+  const sessionId = (await applicant.call('/api/me/id-check', { method: 'POST' })).body.url.split('/').pop();
+  fakeIdentity.sessions.set(sessionId, { status: 'verified', firstName: 'Joshua' });
+  const res = await applicant.call('/api/me/id-check/refresh', { method: 'POST' });
+  assert.equal(res.body.member.status, 'pending');
+  assert.equal(res.body.member.id_check_status, 'name_mismatch');
+  const queued = (await admin('/api/admin/pending')).body.applicants.find((a) => a.username === applicant.username);
+  assert.equal(queued.id_check_name, 'Joshua');
+});
+
+test('Stripe webhooks are signature-checked and apply results', async () => {
+  const applicant = await apply();
+  const sessionId = (await applicant.call('/api/me/id-check', { method: 'POST' })).body.url.split('/').pop();
+  fakeIdentity.sessions.set(sessionId, { status: 'verified', firstName: 'Caleb' });
+  const payload = JSON.stringify({ type: 'identity.verification_session.verified', data: { object: { id: sessionId } } });
+
+  const post = (signature) =>
+    fetch(base + '/api/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature },
+      body: payload,
+    });
+  assert.equal((await post(signWebhook(payload, 'wrong-secret'))).status, 400);
+  assert.equal((await post(signWebhook(payload, WEBHOOK_SECRET, Math.floor(Date.now() / 1000) - 3600))).status, 400);
+  assert.equal((await applicant.call('/api/me')).body.member.status, 'pending');
+
+  assert.equal((await post(signWebhook(payload, WEBHOOK_SECRET))).status, 200);
+  assert.equal((await applicant.call('/api/me')).body.member.status, 'verified');
+});
+
+test('webhook signature and name matching helpers', () => {
+  const body = '{"a":1}';
+  assert.deepEqual(verifyWebhook(body, signWebhook(body, 's'), 's'), { a: 1 });
+  assert.throws(() => verifyWebhook(body, 't=1,v1=abc', 's'));
+  assert.throws(() => verifyWebhook(body, '', 's'));
+  assert.equal(store.matchSpelling('CALEB'), 'Caleb');
+  assert.equal(store.matchSpelling('  Cálev  Ben '), 'Calev');
+  assert.equal(store.matchSpelling('Calebson'), null);
+  assert.equal(store.matchSpelling(null), null);
+});
+
+test('config reports which verification paths are available', async () => {
+  const res = await client()('/api/config');
+  assert.deepEqual(res.body, { idCheck: true, vouchesRequired: 2 });
 });

@@ -104,7 +104,7 @@
         m.spelling && [el('h2', {}, 'Your listing'), profileSection(m)],
         el('h2', {}, 'Password'),
         passwordSection(),
-        m.role !== 'admin' && [el('h2', {}, 'Delete account'), deleteSection()],
+        m.role !== 'owner' && [el('h2', {}, 'Delete account'), deleteSection()],
       ].flat().filter(Boolean));
     });
   </script>

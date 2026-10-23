@@ -32,15 +32,20 @@ const LIMITS = {
 };
 
 const SESSION_DAYS = 30;
+const ADMIN_ROLES = ['admin', 'owner'];
 const NOW = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 // Fields any verified member may see in the directory.
 const PUBLIC_COLUMNS =
-  'number, spelling, surname, location, country, birth_year, occupation, bio, website, verified_at AS created_at, updated_at';
+  "number, spelling, surname, location, country, birth_year, occupation, bio, website, verified_at AS created_at, updated_at, " +
+  "role IN ('admin', 'owner') AS is_admin, role = 'owner' AS is_owner";
+
+// Fields verified members see about applicants, so they can decide whether to vouch.
+const APPLICANT_COLUMNS = 'id, spelling, surname, location, country, birth_year, occupation, bio, website, created_at';
 
 // Fields a member sees about their own account (and admins see when reviewing).
 const ACCOUNT_COLUMNS =
-  'id, username, role, status, review_note, verification_note, number, spelling, surname, location, country, birth_year, occupation, bio, website, created_at, updated_at, verified_at';
+  'id, username, role, status, review_note, verification_note, verification_method, id_check_status, id_check_name, number, spelling, surname, location, country, birth_year, occupation, bio, website, created_at, updated_at, verified_at';
 
 function open(file = ':memory:') {
   const db = new DatabaseSync(file);
@@ -51,10 +56,14 @@ function open(file = ':memory:') {
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
       username          TEXT NOT NULL UNIQUE COLLATE NOCASE,
       password_hash     TEXT NOT NULL,
-      role              TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'admin')),
+      role              TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'admin', 'owner')),
       status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'verified', 'rejected')),
       verification_note TEXT NOT NULL DEFAULT '',
       review_note       TEXT NOT NULL DEFAULT '',
+      verification_method TEXT NOT NULL DEFAULT '',
+      id_check_session  TEXT UNIQUE,
+      id_check_status   TEXT NOT NULL DEFAULT '',
+      id_check_name     TEXT NOT NULL DEFAULT '',
       number            INTEGER UNIQUE,
       spelling          TEXT NOT NULL DEFAULT '',
       surname           TEXT NOT NULL DEFAULT '',
@@ -73,11 +82,30 @@ function open(file = ':memory:') {
       member_id   INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
       expires_at  TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS vouches (
+      applicant_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      voucher_id   INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      created_at   TEXT NOT NULL DEFAULT (${NOW}),
+      PRIMARY KEY (applicant_id, voucher_id)
+    );
   `);
   return db;
 }
 
 const plain = (row) => (row ? { ...row } : null);
+const isAdmin = (m) => Boolean(m && ADMIN_ROLES.includes(m.role));
+
+// Maps a legal first name (as read from an ID) to an accepted spelling, or null.
+// Only the first word counts, ignoring accents: "Cáleb James" -> "Caleb".
+function matchSpelling(name) {
+  const first = String(name ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase();
+  return SPELLINGS[first] || null;
+}
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
 // --- Passwords -------------------------------------------------------------
@@ -138,10 +166,6 @@ function validateProfile(input, { partial = false } = {}) {
     const s = String(input[field]).trim();
     if (s.length > max) errors.push(`${field} must be at most ${max} characters.`);
     value[field] = s;
-  }
-
-  if (!partial && !value.verification_note) {
-    errors.push('verification_note is required: tell us how we can confirm your name.');
   }
 
   if (value.website && !/^https?:\/\/[^\s]+$/i.test(value.website)) {
@@ -216,23 +240,30 @@ function resubmit(db, id) {
   db.prepare("UPDATE members SET status = 'pending', review_note = '' WHERE id = ? AND status = 'rejected'").run(id);
 }
 
+// Grants or removes admin permission. The owner's role never changes here.
+function setAdmin(db, id, admin) {
+  db.prepare("UPDATE members SET role = ? WHERE id = ? AND role != 'owner'").run(admin ? 'admin' : 'member', id);
+  return account(db, id);
+}
+
 function removeMember(db, id) {
   return db.prepare('DELETE FROM members WHERE id = ?').run(id).changes > 0;
 }
 
-// Creates the admin account from configuration, or promotes an existing account.
+// Creates the owner account from configuration, or promotes an existing account.
+// The owner is an admin who cannot be demoted or removed by other admins.
 async function ensureAdmin(db, username, password) {
   const existing = db.prepare('SELECT id FROM members WHERE username = ?').get(username);
   if (existing) {
-    db.prepare("UPDATE members SET role = 'admin' WHERE id = ?").run(existing.id);
-    if (account(db, existing.id).status !== 'verified') verify(db, existing.id);
+    db.prepare("UPDATE members SET role = 'owner' WHERE id = ?").run(existing.id);
+    if (account(db, existing.id).status !== 'verified') verify(db, existing.id, 'owner');
     return account(db, existing.id);
   }
   if (!password) throw new Error('ADMIN_PASSWORD is required to create the admin account.');
   const passwordError = validatePassword(password);
   if (passwordError) throw new Error(`ADMIN_PASSWORD: ${passwordError}`);
-  const admin = await createMember(db, { username, password }, {}, { role: 'admin' });
-  db.prepare(`UPDATE members SET status = 'verified', verified_at = ${NOW} WHERE id = ?`).run(admin.id);
+  const admin = await createMember(db, { username, password }, {}, { role: 'owner' });
+  db.prepare(`UPDATE members SET status = 'verified', verification_method = 'owner', verified_at = ${NOW} WHERE id = ?`).run(admin.id);
   return account(db, admin.id);
 }
 
@@ -242,12 +273,12 @@ function pending(db) {
   return db
     .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM members WHERE status = 'pending' ORDER BY created_at, id`)
     .all()
-    .map(plain);
+    .map((row) => ({ ...row, vouchers: vouchers(db, row.id) }));
 }
 
 // Approves a member. Only accounts with a Caleb profile get a Caleb Number,
 // handed out in order of approval.
-function verify(db, id) {
+function verify(db, id, method = 'admin') {
   const m = account(db, id);
   if (!m) return null;
   db.exec('BEGIN IMMEDIATE');
@@ -256,9 +287,9 @@ function verify(db, id) {
       ? db.prepare('SELECT COALESCE(MAX(number), 0) + 1 AS n FROM members').get().n
       : m.number;
     db.prepare(
-      `UPDATE members SET status = 'verified', review_note = '', number = ?,
+      `UPDATE members SET status = 'verified', review_note = '', number = ?, verification_method = ?,
          verified_at = COALESCE(verified_at, ${NOW}) WHERE id = ?`
-    ).run(next, id);
+    ).run(next, method, id);
     db.exec('COMMIT');
   } catch (err) {
     db.exec('ROLLBACK');
@@ -271,7 +302,91 @@ function reject(db, id, reason) {
   const changes = db
     .prepare("UPDATE members SET status = 'rejected', review_note = ? WHERE id = ? AND status = 'pending'")
     .run(String(reason ?? '').trim().slice(0, 500), id).changes;
-  return changes ? account(db, id) : null;
+  if (!changes) return null;
+  // A rejection resets vouching, so earlier vouches cannot outvote it.
+  db.prepare('DELETE FROM vouches WHERE applicant_id = ?').run(id);
+  return account(db, id);
+}
+
+// --- Vouching --------------------------------------------------------------
+
+function vouchers(db, applicantId) {
+  return db
+    .prepare(
+      `SELECT m.number, m.spelling, m.surname FROM vouches v JOIN members m ON m.id = v.voucher_id
+       WHERE v.applicant_id = ? ORDER BY v.created_at`
+    )
+    .all(applicantId)
+    .map(plain);
+}
+
+function vouchCount(db, applicantId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM vouches WHERE applicant_id = ?').get(applicantId).n;
+}
+
+// Pending applicants as a verified member sees them, with their vouching state.
+function applicants(db, viewerId) {
+  return db
+    .prepare(
+      `SELECT ${APPLICANT_COLUMNS},
+         (SELECT COUNT(*) FROM vouches v WHERE v.applicant_id = members.id) AS vouch_count,
+         EXISTS (SELECT 1 FROM vouches v WHERE v.applicant_id = members.id AND v.voucher_id = ?) AS vouched_by_me
+       FROM members WHERE status = 'pending' AND spelling != '' ORDER BY created_at, id`
+    )
+    .all(viewerId)
+    .map(plain);
+}
+
+// Records a vouch, and verifies the applicant once enough members have vouched.
+// Returns the applicant's account, or null if they are not a pending applicant.
+function vouch(db, applicantId, voucherId, required) {
+  const applicant = account(db, applicantId);
+  if (!applicant || applicant.status !== 'pending' || applicantId === voucherId) return null;
+  db.prepare('INSERT OR IGNORE INTO vouches (applicant_id, voucher_id) VALUES (?, ?)').run(applicantId, voucherId);
+  if (vouchCount(db, applicantId) >= required) return verify(db, applicantId, 'vouch');
+  return account(db, applicantId);
+}
+
+function unvouch(db, applicantId, voucherId) {
+  const applicant = account(db, applicantId);
+  if (!applicant || applicant.status !== 'pending') return null;
+  db.prepare('DELETE FROM vouches WHERE applicant_id = ? AND voucher_id = ?').run(applicantId, voucherId);
+  return applicant;
+}
+
+// --- ID checks -------------------------------------------------------------
+
+function startIdCheck(db, id, sessionId) {
+  db.prepare("UPDATE members SET id_check_session = ?, id_check_status = 'started' WHERE id = ?").run(sessionId, id);
+}
+
+function memberForIdSession(db, sessionId) {
+  const row = db.prepare('SELECT id FROM members WHERE id_check_session = ?').get(sessionId);
+  return row ? account(db, row.id) : null;
+}
+
+// Applies the outcome of an ID check. A verified ID whose first name is an accepted
+// spelling approves the member straight away; any other name goes to a reviewer.
+function recordIdCheck(db, id, { status, firstName }) {
+  const member = account(db, id);
+  if (!member) return null;
+  if (status === 'verified') {
+    const spelling = matchSpelling(firstName);
+    db.prepare('UPDATE members SET id_check_status = ?, id_check_name = ? WHERE id = ?').run(
+      spelling ? 'verified' : 'name_mismatch',
+      String(firstName ?? '').slice(0, 100),
+      id
+    );
+    if (spelling && member.status !== 'verified') {
+      db.prepare('UPDATE members SET spelling = ? WHERE id = ?').run(spelling, id);
+      if (member.status === 'rejected') db.prepare("UPDATE members SET status = 'pending' WHERE id = ?").run(id);
+      return verify(db, id, 'id');
+    }
+  } else {
+    const mapped = { processing: 'processing', requires_input: 'failed', canceled: 'failed' }[status];
+    if (mapped) db.prepare('UPDATE members SET id_check_status = ? WHERE id = ?').run(mapped, id);
+  }
+  return account(db, id);
 }
 
 // --- Sessions --------------------------------------------------------------
@@ -376,6 +491,8 @@ function stats(db) {
 
 module.exports = {
   SPELLINGS,
+  isAdmin,
+  matchSpelling,
   DuplicateUsername,
   open,
   validateCredentials,
@@ -393,6 +510,15 @@ module.exports = {
   pending,
   verify,
   reject,
+  setAdmin,
+  vouchers,
+  vouchCount,
+  applicants,
+  vouch,
+  unvouch,
+  startIdCheck,
+  memberForIdSession,
+  recordIdCheck,
   createSession,
   sessionMember,
   endSession,
