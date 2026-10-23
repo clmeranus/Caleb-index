@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Caleb · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site">
+        <a href="/">Index</a>
+        <a href="/stats">Statistics</a>
+        <a href="/register">Register</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap" id="main"><p class="note">Loading…</p></main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · Entries are self-reported by the Calebs themselves.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const main = document.getElementById('main');
+    const number = Number(new URLSearchParams(location.search).get('n'));
+    const FIELDS = [
+      ['surname', 'Surname'],
+      ['location', 'Town or city'],
+      ['country', 'Country'],
+      ['birth_year', 'Birth year'],
+      ['occupation', 'Occupation'],
+      ['website', 'Website'],
+      ['bio', 'About'],
+    ];
+
+    function storedToken() {
+      try { return localStorage.getItem(`caleb-token-${number}`) || ''; } catch { return ''; }
+    }
+
+    function render(c) {
+      document.title = `${fullName(c)} · ${calebNumber(c.number)} · The Caleb Index`;
+      const rows = [
+        ['Location', place(c)],
+        ['Born', c.birth_year],
+        ['Occupation', c.occupation],
+        ['Website', c.website && el('a', { href: c.website, rel: 'nofollow noopener ugc', target: '_blank' }, c.website)],
+        ['Registered', new Date(c.created_at).toLocaleDateString(undefined, { dateStyle: 'long' })],
+      ].filter(([, v]) => v);
+
+      main.replaceChildren(
+        el('article', { class: 'profile' },
+          el('span', { class: 'badge' }, calebNumber(c.number)),
+          el('h1', { style: 'margin-top:12px' }, fullName(c)),
+          c.bio && el('p', { class: 'bio' }, c.bio),
+          el('dl', {}, rows.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+          el('a', { href: '/' }, '← Back to the Index'),
+          manage(c)
+        )
+      );
+    }
+
+    function manage(c) {
+      const status = el('div');
+      const form = el('form', { class: 'register' },
+        el('div', { class: 'field' },
+          el('label', { for: 'token' }, 'Edit key'),
+          el('input', { id: 'token', name: 'token', value: storedToken(), autocomplete: 'off', required: true })
+        ),
+        el('div', { class: 'field' },
+          el('label', { for: 'first_name' }, 'First name'),
+          el('input', { id: 'first_name', name: 'first_name', value: c.spelling })
+        ),
+        FIELDS.map(([name, label]) =>
+          el('div', { class: 'field' },
+            el('label', { for: name }, label),
+            name === 'bio'
+              ? el('textarea', { id: name, name, rows: 4, maxlength: 500 }, c[name] || '')
+              : el('input', { id: name, name, value: c[name] ?? '' })
+          )
+        ),
+        status,
+        el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' },
+          el('button', { class: 'btn', type: 'submit' }, 'Save changes'),
+          el('button', { class: 'btn danger', type: 'button', onclick: () => removeEntry(form, status) }, 'Remove my entry')
+        )
+      );
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const { token, ...body } = Object.fromEntries(new FormData(form));
+        try {
+          const updated = await api(`/api/calebs/${number}`, { method: 'PATCH', body, token });
+          try { localStorage.setItem(`caleb-token-${number}`, token); } catch {}
+          render(updated);
+        } catch (err) {
+          status.replaceChildren(errorBox(err));
+        }
+      });
+
+      return el('details', { class: 'manage' }, el('summary', {}, 'Is this you? Edit or remove this entry'), form);
+    }
+
+    async function removeEntry(form, status) {
+      if (!confirm('Remove this entry from the Index? Your Caleb Number will not be reissued.')) return;
+      try {
+        await api(`/api/calebs/${number}`, { method: 'DELETE', token: form.token.value });
+        try { localStorage.removeItem(`caleb-token-${number}`); } catch {}
+        main.replaceChildren(el('p', { class: 'note' }, 'Your entry has been removed. ', el('a', { href: '/' }, 'Back to the Index')));
+      } catch (err) {
+        status.replaceChildren(errorBox(err));
+      }
+    }
+
+    api(`/api/calebs/${number}`)
+      .then(render)
+      .catch(() => main.replaceChildren(
+        el('h1', {}, 'Caleb not found'),
+        el('p', { class: 'note' }, 'There is no Caleb with that number. ', el('a', { href: '/' }, 'Back to the Index'))
+      ));
+  </script>
+</body>
+</html>

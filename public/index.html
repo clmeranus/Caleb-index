@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Caleb Index</title>
+  <meta name="description" content="The public register of people named Caleb.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site">
+        <a href="/" aria-current="page">Index</a>
+        <a href="/stats">Statistics</a>
+        <a href="/register">Register</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <h1>Every Caleb, accounted for.</h1>
+        <p class="lede">The Caleb Index is a public register of people named Caleb (and Kaleb, Calev, and other spellings).
+          Each registrant gets a permanent Caleb Number, in order of sign-up.</p>
+        <a class="btn" href="/register">Register as a Caleb</a>
+      </div>
+      <div class="counter">
+        <strong id="total">–</strong>
+        <small>Calebs registered</small>
+      </div>
+    </section>
+
+    <form class="filters" id="filters" role="search">
+      <input type="search" name="q" placeholder="Search by surname, place, occupation…" aria-label="Search">
+      <select name="spelling" aria-label="Spelling">
+        <option value="">All spellings</option>
+      </select>
+      <select name="sort" aria-label="Sort">
+        <option value="number">Caleb Number</option>
+        <option value="newest">Newest first</option>
+        <option value="surname">Surname A–Z</option>
+        <option value="oldest">Eldest first</option>
+      </select>
+    </form>
+
+    <div id="results" class="grid" aria-live="polite"></div>
+    <div id="pager" class="pager"></div>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · Entries are self-reported by the Calebs themselves.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const PAGE_SIZE = 48;
+    const form = document.getElementById('filters');
+    const results = document.getElementById('results');
+    const pager = document.getElementById('pager');
+    let offset = 0;
+    let timer;
+
+    api('/api/spellings').then((list) => {
+      form.spelling.append(...list.map((s) => el('option', { value: s }, s)));
+    });
+
+    async function load() {
+      const params = new URLSearchParams(new FormData(form));
+      params.set('limit', PAGE_SIZE);
+      params.set('offset', offset);
+      try {
+        const { total, calebs } = await api('/api/calebs?' + params);
+        const filtered = params.get('q') || params.get('spelling');
+        if (!filtered) document.getElementById('total').textContent = total.toLocaleString();
+        results.replaceChildren(
+          ...(calebs.length
+            ? calebs.map(calebCard)
+            : [el('p', { class: 'empty' }, filtered ? 'No Calebs match that search.' : 'No Calebs yet. Be the first!')])
+        );
+        pager.replaceChildren(...[
+          offset > 0 && el('button', { class: 'btn ghost', onclick: () => { offset -= PAGE_SIZE; load(); } }, '← Previous'),
+          offset + PAGE_SIZE < total && el('button', { class: 'btn ghost', onclick: () => { offset += PAGE_SIZE; load(); } }, 'Next →')
+        ].filter(Boolean));
+      } catch (err) {
+        results.replaceChildren(errorBox(err));
+      }
+    }
+
+    form.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { offset = 0; load(); }, 200);
+    });
+    form.addEventListener('submit', (e) => e.preventDefault());
+    load();
+  </script>
+</body>
+</html>

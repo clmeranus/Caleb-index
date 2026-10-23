@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Statistics · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site">
+        <a href="/">Index</a>
+        <a href="/stats" aria-current="page">Statistics</a>
+        <a href="/register">Register</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h1>Caleb statistics</h1>
+    <p class="lede" id="summary">Counting Calebs…</p>
+    <div class="stats" id="stats"></div>
+    <h2>Newest Calebs</h2>
+    <div class="grid" id="latest"></div>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · Entries are self-reported by the Calebs themselves.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    function bars(title, rows, format = (l) => l) {
+      const max = Math.max(1, ...rows.map((r) => r.n));
+      return el('section', { class: 'panel' },
+        el('h2', { style: 'margin-top:0' }, title),
+        rows.length
+          ? el('ul', { class: 'bars' }, rows.map((r) =>
+              el('li', {},
+                el('span', { class: 'label', title: format(r.label) }, format(r.label)),
+                el('span', { class: 'track' }, el('span', { class: 'fill', style: `display:block;width:${(r.n / max) * 100}%` })),
+                el('span', { class: 'n' }, r.n)
+              )))
+          : el('p', { class: 'note' }, 'Not enough data yet.')
+      );
+    }
+
+    api('/api/stats').then((s) => {
+      document.getElementById('summary').textContent =
+        `${s.total.toLocaleString()} ${s.total === 1 ? 'Caleb has' : 'Calebs have'} registered so far.`;
+      document.getElementById('stats').replaceChildren(
+        bars('By spelling', s.bySpelling),
+        bars('By country', s.byCountry),
+        bars('By decade of birth', s.byDecade, (d) => `${d}s`)
+      );
+      document.getElementById('latest').replaceChildren(...s.latest.map(calebCard));
+    }).catch((err) => document.getElementById('stats').replaceChildren(errorBox(err)));
+  </script>
+</body>
+</html>

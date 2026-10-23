@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Register · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site">
+        <a href="/">Index</a>
+        <a href="/stats">Statistics</a>
+        <a href="/register" aria-current="page">Register</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h1>Register as a Caleb</h1>
+    <p class="lede">Only your first name is required. Everything you enter here is shown publicly, so share only what you're happy for anyone to see.</p>
+
+    <div id="out"></div>
+
+    <form class="register" id="register" novalidate>
+      <div class="row">
+        <div class="field">
+          <label for="first_name">First name *</label>
+          <input id="first_name" name="first_name" required value="Caleb" autocomplete="given-name">
+          <div class="hint">Caleb, Kaleb, Calev, Cayleb, and similar spellings are welcome.</div>
+        </div>
+        <div class="field">
+          <label for="surname">Surname</label>
+          <input id="surname" name="surname" maxlength="60" autocomplete="family-name">
+          <div class="hint">Optional. An initial works too.</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="location">Town or city</label>
+          <input id="location" name="location" maxlength="80">
+        </div>
+        <div class="field">
+          <label for="country">Country</label>
+          <input id="country" name="country" maxlength="60" autocomplete="country-name">
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="birth_year">Birth year</label>
+          <input id="birth_year" name="birth_year" inputmode="numeric" maxlength="4" placeholder="e.g. 1996">
+        </div>
+        <div class="field">
+          <label for="occupation">Occupation</label>
+          <input id="occupation" name="occupation" maxlength="80">
+        </div>
+      </div>
+      <div class="field">
+        <label for="bio">About you</label>
+        <textarea id="bio" name="bio" rows="4" maxlength="500" placeholder="Anything you'd like other Calebs to know."></textarea>
+      </div>
+      <div class="field">
+        <label for="website">Website</label>
+        <input id="website" name="website" type="url" maxlength="200" placeholder="https://">
+      </div>
+      <div class="hp" aria-hidden="true">
+        <label for="website_confirm">Leave this empty</label>
+        <input id="website_confirm" name="website_confirm" tabindex="-1" autocomplete="off">
+      </div>
+      <div><button class="btn" type="submit">Claim my Caleb Number</button></div>
+    </form>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · Entries are self-reported by the Calebs themselves.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const form = document.getElementById('register');
+    const out = document.getElementById('out');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const button = form.querySelector('button');
+      button.disabled = true;
+      out.replaceChildren();
+      try {
+        const { caleb, token } = await api('/api/calebs', { method: 'POST', body: Object.fromEntries(new FormData(form)) });
+        try { localStorage.setItem(`caleb-token-${caleb.number}`, token); } catch {}
+        form.remove();
+        out.replaceChildren(
+          el('div', { class: 'panel success' },
+            el('h2', { style: 'margin-top:0' }, `Welcome, ${calebNumber(caleb.number)}.`),
+            el('p', {}, `${fullName(caleb)} is now officially in the Index.`),
+            el('p', {}, 'This is your edit key. Save it somewhere safe: it is the only way to change or remove your entry, and it will not be shown again.'),
+            el('code', { class: 'token' }, token),
+            el('a', { class: 'btn', href: `/caleb?n=${caleb.number}` }, 'View my entry')
+          )
+        );
+      } catch (err) {
+        out.replaceChildren(errorBox(err));
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
