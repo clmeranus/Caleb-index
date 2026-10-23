@@ -113,6 +113,19 @@ function parseCookies(header = '') {
   return out;
 }
 
+// The visitor's address. Behind a reverse proxy, each proxy appends the address it
+// received the request from to X-Forwarded-For, so with `hops` trusted proxies the
+// visitor is the hops-th entry from the end. Entries further left can be forged.
+function clientIp(req, hops) {
+  const remote = req.socket.remoteAddress || 'unknown';
+  if (!hops) return remote;
+  const chain = String(req.headers['x-forwarded-for'] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return chain.length ? chain[Math.max(chain.length - hops, 0)] : remote;
+}
+
 function parseNumber(raw) {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(404, 'No such Caleb.');
@@ -172,6 +185,7 @@ function createServer({
   db,
   secureCookies = process.env.COOKIE_SECURE === '1',
   vouchesRequired = Number(process.env.VOUCHES_REQUIRED) || 2,
+  proxyHops = Number(process.env.TRUST_PROXY_HOPS) || 0,
   registerLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
   loginLimit = rateLimiter({ max: 10, windowMs: 15 * 60 * 1000 }),
 } = {}) {
@@ -421,6 +435,10 @@ function createServer({
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/healthz') {
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      return res.end('ok');
+    }
     try {
       const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
       const ctx = {
@@ -429,7 +447,7 @@ function createServer({
         url,
         token,
         member: store.sessionMember(db, token),
-        ip: req.socket.remoteAddress || 'unknown',
+        ip: clientIp(req, proxyHops),
       };
       if (url.pathname.startsWith('/api/')) return await api(ctx);
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed.');
@@ -454,8 +472,18 @@ if (require.main === module) {
     } else {
       console.warn('ADMIN_USERNAME is not set: nobody will be able to verify new members.');
     }
-    createServer({ db }).listen(port, () => {
+    const server = createServer({ db }).listen(port, () => {
       console.log(`Caleb Index listening on http://localhost:${port}`);
+    });
+    // Hosts stop the old instance with SIGTERM on every deploy: finish in-flight
+    // requests and close the database cleanly.
+    process.on('SIGTERM', () => {
+      server.close(() => {
+        db.close();
+        process.exit(0);
+      });
+      server.closeIdleConnections();
+      setTimeout(() => process.exit(0), 10_000).unref();
     });
   })().catch((err) => {
     console.error(err.message);
@@ -463,4 +491,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, rateLimiter };
+module.exports = { createServer, rateLimiter, clientIp };

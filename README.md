@@ -61,11 +61,38 @@ npm test
 | `ADMIN_PASSWORD` | (unset)     | Password used when the owner account is first created          |
 | `COOKIE_SECURE`  | (unset)     | Set to `1` to mark the session cookie `Secure` (HTTPS only)    |
 | `VOUCHES_REQUIRED` | `2`       | Vouches needed to approve an applicant                         |
+| `TRUST_PROXY_HOPS` | `0`       | Reverse proxies in front of the app; used to find visitors' IPs for rate limits |
 
 The owner account is created on first start. After that, `ADMIN_PASSWORD` is not
 needed, and changing it has no effect: change the password from the account page.
 If you are a Caleb yourself, you can apply like anyone else and then restart with
 `ADMIN_USERNAME` set to your username to make yourself the owner.
+
+## Deploying to Render
+
+The repository includes a [Render Blueprint](render.yaml).
+
+1. In the Render dashboard, choose **New > Blueprint** and select this repository.
+2. Enter `ADMIN_USERNAME` and `ADMIN_PASSWORD` when asked. These create the owner account.
+3. Apply the Blueprint. Render builds the app and gives it an `onrender.com` address.
+4. Log in with the owner account. Then delete `ADMIN_PASSWORD` from the service's
+   environment settings: it's only needed the first time, and you can change your
+   password from the account page.
+
+The Blueprint uses the **Starter** instance type with a 1 GB persistent disk, because
+the database is a file and must survive restarts and deploys. Render's free instance
+type has no persistent disk, so the database would be erased on every deploy. A disk
+also means the service runs as a single instance, with a few seconds of downtime
+during each deploy.
+
+Pushes to the default branch redeploy automatically.
+
+**Visitor IPs.** Rate limits are counted per visitor IP. Behind Render's proxies the
+connection comes from Render, so the app reads the IP from `X-Forwarded-For`, counting
+`TRUST_PROXY_HOPS` entries from the right. Render doesn't document how many entries
+its proxies add; `2` matches what other Render users report. If sign-ups start being
+refused as "too many from here" for everyone, check the header in your logs and adjust
+this value.
 
 ## API
 

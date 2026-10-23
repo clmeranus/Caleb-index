@@ -3,7 +3,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const store = require('../src/db');
-const { createServer, rateLimiter } = require('../src/server');
+const { createServer, rateLimiter, clientIp } = require('../src/server');
 let server;
 let base;
 let db;
@@ -326,4 +326,19 @@ test('admins grant and remove admin permission from a profile', async () => {
 test('config reports how many vouches are required', async () => {
   const res = await client()('/api/config');
   assert.deepEqual(res.body, { vouchesRequired: 2 });
+});
+
+test('client IP comes from the trusted end of X-Forwarded-For', () => {
+  const req = (xff) => ({ socket: { remoteAddress: '10.0.0.1' }, headers: xff ? { 'x-forwarded-for': xff } : {} });
+  assert.equal(clientIp(req('1.1.1.1'), 0), '10.0.0.1', 'ignored unless proxies are trusted');
+  assert.equal(clientIp(req('1.1.1.1, 172.64.0.9'), 2), '1.1.1.1');
+  assert.equal(clientIp(req('6.6.6.6, 1.1.1.1, 172.64.0.9'), 2), '1.1.1.1', 'a forged first entry is skipped');
+  assert.equal(clientIp(req('1.1.1.1'), 2), '1.1.1.1');
+  assert.equal(clientIp(req(''), 2), '10.0.0.1');
+});
+
+test('health check', async () => {
+  const res = await fetch(base + '/healthz');
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), 'ok');
 });
