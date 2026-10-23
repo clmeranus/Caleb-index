@@ -85,7 +85,7 @@ The repository includes [`fly.toml`](fly.toml) and a `Dockerfile`.
    It's only needed the first time, and you can change your password from the account page.
 
 The app stops when idle and starts on the next visit, so the first page after a quiet
-spell takes a moment to load. The volume and machine are in Amsterdam (`ams`); to move
+spell takes a moment to load. The volume and machine are in Chicago (`ord`); to move
 them closer to your members, change `primary_region` before the first deploy.
 
 Rate limits are counted per visitor IP. On Fly the app reads it from the `Fly-Client-IP`
