@@ -4,23 +4,6 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const store = require('../src/db');
 const { createServer, rateLimiter } = require('../src/server');
-const { signWebhook, verifyWebhook } = require('../src/identity');
-
-const WEBHOOK_SECRET = 'whsec_test';
-
-// Stands in for Stripe Identity. Tests set the outcome of each session.
-const fakeIdentity = {
-  sessions: new Map(),
-  async createSession({ memberId, returnUrl }) {
-    const id = `vs_${memberId}_${this.sessions.size}`;
-    this.sessions.set(id, { status: 'requires_input', firstName: null, returnUrl });
-    return { id, url: `https://verify.stripe.test/${id}` };
-  },
-  async getSession(id) {
-    return { id, ...this.sessions.get(id) };
-  },
-};
-
 let server;
 let base;
 let db;
@@ -34,8 +17,6 @@ before(async () => {
     registerLimit: () => true,
     loginLimit: () => true,
     vouchesRequired: 2,
-    identity: fakeIdentity,
-    webhookSecret: WEBHOOK_SECRET,
   });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}`;
@@ -127,7 +108,7 @@ test('sign-up validation', async () => {
   assert.equal(notCaleb.res.status, 422);
 
   const noEvidence = await apply({ verification_note: '' });
-  assert.equal(noEvidence.res.status, 201, 'evidence is optional now that ID checks and vouching exist');
+  assert.equal(noEvidence.res.status, 201, 'evidence is optional now that vouching exists');
 
   const weak = await apply({ password: 'short' });
   assert.equal(weak.res.status, 422);
@@ -342,65 +323,7 @@ test('admins grant and remove admin permission from a profile', async () => {
   assert.equal((await promoted.call('/admin')).location, '/');
 });
 
-test('a verified ID with an accepted first name approves instantly', async () => {
-  const applicant = await apply({ first_name: 'Caleb', surname: 'IdCheck' });
-  const start = await applicant.call('/api/me/id-check', { method: 'POST' });
-  assert.match(start.body.url, /^https:\/\/verify\.stripe\.test\//);
-  const sessionId = start.body.url.split('/').pop();
-  assert.match(fakeIdentity.sessions.get(sessionId).returnUrl, /\/pending\?id_check=done$/);
-  assert.equal((await applicant.call('/api/me')).body.member.id_check_status, 'started');
-
-  fakeIdentity.sessions.set(sessionId, { status: 'verified', firstName: 'Kaléb Andrew' });
-  const res = await applicant.call('/api/me/id-check/refresh', { method: 'POST' });
-  assert.equal(res.body.member.status, 'verified');
-  assert.equal(res.body.member.verification_method, 'id');
-  assert.equal(res.body.member.spelling, 'Kaleb', 'the listing takes the spelling from the ID');
-  assert.equal((await applicant.call('/api/me/id-check', { method: 'POST' })).status, 400);
-});
-
-test('an ID with a different first name goes to admin review', async () => {
-  const applicant = await apply();
-  const sessionId = (await applicant.call('/api/me/id-check', { method: 'POST' })).body.url.split('/').pop();
-  fakeIdentity.sessions.set(sessionId, { status: 'verified', firstName: 'Joshua' });
-  const res = await applicant.call('/api/me/id-check/refresh', { method: 'POST' });
-  assert.equal(res.body.member.status, 'pending');
-  assert.equal(res.body.member.id_check_status, 'name_mismatch');
-  const queued = (await admin('/api/admin/pending')).body.applicants.find((a) => a.username === applicant.username);
-  assert.equal(queued.id_check_name, 'Joshua');
-});
-
-test('Stripe webhooks are signature-checked and apply results', async () => {
-  const applicant = await apply();
-  const sessionId = (await applicant.call('/api/me/id-check', { method: 'POST' })).body.url.split('/').pop();
-  fakeIdentity.sessions.set(sessionId, { status: 'verified', firstName: 'Caleb' });
-  const payload = JSON.stringify({ type: 'identity.verification_session.verified', data: { object: { id: sessionId } } });
-
-  const post = (signature) =>
-    fetch(base + '/api/webhooks/stripe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Stripe-Signature': signature },
-      body: payload,
-    });
-  assert.equal((await post(signWebhook(payload, 'wrong-secret'))).status, 400);
-  assert.equal((await post(signWebhook(payload, WEBHOOK_SECRET, Math.floor(Date.now() / 1000) - 3600))).status, 400);
-  assert.equal((await applicant.call('/api/me')).body.member.status, 'pending');
-
-  assert.equal((await post(signWebhook(payload, WEBHOOK_SECRET))).status, 200);
-  assert.equal((await applicant.call('/api/me')).body.member.status, 'verified');
-});
-
-test('webhook signature and name matching helpers', () => {
-  const body = '{"a":1}';
-  assert.deepEqual(verifyWebhook(body, signWebhook(body, 's'), 's'), { a: 1 });
-  assert.throws(() => verifyWebhook(body, 't=1,v1=abc', 's'));
-  assert.throws(() => verifyWebhook(body, '', 's'));
-  assert.equal(store.matchSpelling('CALEB'), 'Caleb');
-  assert.equal(store.matchSpelling('  Cálev  Ben '), 'Calev');
-  assert.equal(store.matchSpelling('Calebson'), null);
-  assert.equal(store.matchSpelling(null), null);
-});
-
-test('config reports which verification paths are available', async () => {
+test('config reports how many vouches are required', async () => {
   const res = await client()('/api/config');
-  assert.deepEqual(res.body, { idCheck: true, vouchesRequired: 2 });
+  assert.deepEqual(res.body, { vouchesRequired: 2 });
 });

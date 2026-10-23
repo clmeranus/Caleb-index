@@ -45,7 +45,7 @@ const APPLICANT_COLUMNS = 'id, spelling, surname, location, country, birth_year,
 
 // Fields a member sees about their own account (and admins see when reviewing).
 const ACCOUNT_COLUMNS =
-  'id, username, role, status, review_note, verification_note, verification_method, id_check_status, id_check_name, number, spelling, surname, location, country, birth_year, occupation, bio, website, created_at, updated_at, verified_at';
+  'id, username, role, status, review_note, verification_note, verification_method, number, spelling, surname, location, country, birth_year, occupation, bio, website, created_at, updated_at, verified_at';
 
 function open(file = ':memory:') {
   const db = new DatabaseSync(file);
@@ -61,9 +61,6 @@ function open(file = ':memory:') {
       verification_note TEXT NOT NULL DEFAULT '',
       review_note       TEXT NOT NULL DEFAULT '',
       verification_method TEXT NOT NULL DEFAULT '',
-      id_check_session  TEXT UNIQUE,
-      id_check_status   TEXT NOT NULL DEFAULT '',
-      id_check_name     TEXT NOT NULL DEFAULT '',
       number            INTEGER UNIQUE,
       spelling          TEXT NOT NULL DEFAULT '',
       surname           TEXT NOT NULL DEFAULT '',
@@ -94,18 +91,6 @@ function open(file = ':memory:') {
 
 const plain = (row) => (row ? { ...row } : null);
 const isAdmin = (m) => Boolean(m && ADMIN_ROLES.includes(m.role));
-
-// Maps a legal first name (as read from an ID) to an accepted spelling, or null.
-// Only the first word counts, ignoring accents: "Cáleb James" -> "Caleb".
-function matchSpelling(name) {
-  const first = String(name ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .split(/\s+/)[0]
-    .toLowerCase();
-  return SPELLINGS[first] || null;
-}
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 
 // --- Passwords -------------------------------------------------------------
@@ -354,41 +339,6 @@ function unvouch(db, applicantId, voucherId) {
   return applicant;
 }
 
-// --- ID checks -------------------------------------------------------------
-
-function startIdCheck(db, id, sessionId) {
-  db.prepare("UPDATE members SET id_check_session = ?, id_check_status = 'started' WHERE id = ?").run(sessionId, id);
-}
-
-function memberForIdSession(db, sessionId) {
-  const row = db.prepare('SELECT id FROM members WHERE id_check_session = ?').get(sessionId);
-  return row ? account(db, row.id) : null;
-}
-
-// Applies the outcome of an ID check. A verified ID whose first name is an accepted
-// spelling approves the member straight away; any other name goes to a reviewer.
-function recordIdCheck(db, id, { status, firstName }) {
-  const member = account(db, id);
-  if (!member) return null;
-  if (status === 'verified') {
-    const spelling = matchSpelling(firstName);
-    db.prepare('UPDATE members SET id_check_status = ?, id_check_name = ? WHERE id = ?').run(
-      spelling ? 'verified' : 'name_mismatch',
-      String(firstName ?? '').slice(0, 100),
-      id
-    );
-    if (spelling && member.status !== 'verified') {
-      db.prepare('UPDATE members SET spelling = ? WHERE id = ?').run(spelling, id);
-      if (member.status === 'rejected') db.prepare("UPDATE members SET status = 'pending' WHERE id = ?").run(id);
-      return verify(db, id, 'id');
-    }
-  } else {
-    const mapped = { processing: 'processing', requires_input: 'failed', canceled: 'failed' }[status];
-    if (mapped) db.prepare('UPDATE members SET id_check_status = ? WHERE id = ?').run(mapped, id);
-  }
-  return account(db, id);
-}
-
 // --- Sessions --------------------------------------------------------------
 
 function createSession(db, memberId) {
@@ -492,7 +442,6 @@ function stats(db) {
 module.exports = {
   SPELLINGS,
   isAdmin,
-  matchSpelling,
   DuplicateUsername,
   open,
   validateCredentials,
@@ -516,9 +465,6 @@ module.exports = {
   applicants,
   vouch,
   unvouch,
-  startIdCheck,
-  memberForIdSession,
-  recordIdCheck,
   createSession,
   sessionMember,
   endSession,

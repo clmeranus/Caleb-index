@@ -7,12 +7,7 @@ sequential **Caleb Number** and access to the searchable index.
 ## How membership works
 
 1. **Apply** at `/register`: choose a username and password and fill in a listing.
-2. **Get verified** in any of three ways, from the application page (`/pending`):
-   - **ID check (instant).** The applicant scans a government ID and takes a selfie
-     through Stripe Identity. If the first name on the ID is an accepted spelling of
-     Caleb, they are approved immediately, and their listing takes the ID's spelling.
-     Any other name goes to an admin. The site never receives the ID itself, only the
-     check's result and the first name on it.
+2. **Get verified** in either of two ways, from the application page (`/pending`):
    - **Vouching.** Verified members see open applications under `/applicants` and can
      vouch for people they know. Two vouches (configurable) approve the applicant
      automatically. Admins can see who vouched for whom, and a rejection clears an
@@ -66,29 +61,11 @@ npm test
 | `ADMIN_PASSWORD` | (unset)     | Password used when the owner account is first created          |
 | `COOKIE_SECURE`  | (unset)     | Set to `1` to mark the session cookie `Secure` (HTTPS only)    |
 | `VOUCHES_REQUIRED` | `2`       | Vouches needed to approve an applicant                         |
-| `STRIPE_SECRET_KEY` | (unset)  | Turns on ID checks (see below)                                 |
-| `STRIPE_WEBHOOK_SECRET` | (unset) | Signing secret for the Stripe webhook                      |
-| `PUBLIC_URL`     | (unset)     | The site's address, e.g. `https://calebindex.example`, used for Stripe's return link |
 
 The owner account is created on first start. After that, `ADMIN_PASSWORD` is not
 needed, and changing it has no effect: change the password from the account page.
 If you are a Caleb yourself, you can apply like anyone else and then restart with
 `ADMIN_USERNAME` set to your username to make yourself the owner.
-
-### Turning on ID checks
-
-ID checks are off until a Stripe key is set. Stripe charges per verification (about
-$1.50 each at the time of writing; check Stripe's pricing page).
-
-1. Create a Stripe account and enable Identity in the dashboard.
-2. Set `STRIPE_SECRET_KEY` to your secret key (or a restricted key with Identity
-   read and write access), and `PUBLIC_URL` to your site's address.
-3. In Stripe, add a webhook endpoint pointing at `https://<your site>/api/webhooks/stripe`
-   for the `identity.verification_session.verified`, `.requires_input`, `.processing`
-   and `.canceled` events, and set `STRIPE_WEBHOOK_SECRET` to its signing secret.
-   Without the webhook, results still arrive when the applicant returns to the site.
-
-Use Stripe's test-mode keys first: test mode lets you try the whole flow without a real ID.
 
 ## API
 
@@ -105,14 +82,11 @@ Use Stripe's test-mode keys first: test mode lets you try the whole flow without
 | `GET`    | `/api/calebs/:number`             | verified member     |                                               |
 | `GET`    | `/api/stats`                      | verified member     |                                               |
 | `GET`    | `/api/spellings`                  | anyone              | Accepted spellings of the name                |
-| `GET`    | `/api/config`                     | anyone              | Whether ID checks are on; vouches required    |
-| `POST`   | `/api/me/id-check`                | applicant           | Start an ID check; returns Stripe's URL       |
-| `POST`   | `/api/me/id-check/refresh`        | logged in           | Fetch the latest ID check result              |
+| `GET`    | `/api/config`                     | anyone              | Number of vouches required                    |
 | `GET`    | `/api/applicants`                 | verified member     | Open applications, with vouch counts          |
 | `POST`   | `/api/applicants/:id/vouch`       | verified member     | Vouch; may approve the applicant              |
 | `DELETE` | `/api/applicants/:id/vouch`       | verified member     | Withdraw a vouch                              |
 | `PUT`    | `/api/calebs/:number/admin`       | admin               | `{ "admin": true }` or `{ "admin": false }`   |
-| `POST`   | `/api/webhooks/stripe`            | Stripe              | Signed webhook for ID check results           |
 | `GET`    | `/api/admin/pending`              | admin               | Applications awaiting review                  |
 | `POST`   | `/api/admin/members/:id/verify`   | admin               | Approve and assign a Caleb Number             |
 | `POST`   | `/api/admin/members/:id/reject`   | admin               | `{ reason }`                                  |
@@ -122,7 +96,6 @@ Use Stripe's test-mode keys first: test mode lets you try the whole flow without
 
 ```
 src/db.js        storage, validation, passwords, sessions, verification, vouching
-src/identity.js  Stripe Identity client and webhook signature checks
 src/server.js    HTTP server, access control, API routes, static files
 public/          pages (login, register, pending, index, caleb, stats, applicants, account, admin)
 test/            API tests (node:test)

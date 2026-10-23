@@ -18,8 +18,8 @@
   <main class="wrap">
     <h1>Review applications</h1>
     <p class="lede">Check that each applicant's name really is Caleb (or a recognized spelling) using the evidence they gave.
-      Approving them assigns the next Caleb Number and lets them into the Index. Applicants who pass an ID check or
-      collect enough vouches are approved automatically and never appear here.</p>
+      Approving them assigns the next Caleb Number and lets them into the Index. Applicants who collect enough vouches
+      from members are approved automatically and never appear here.</p>
     <div id="queue" class="queue"><p class="note">Loading…</p></div>
   </main>
 
@@ -28,13 +28,6 @@
   <script src="/common.js"></script>
   <script>
     const queue = document.getElementById('queue');
-
-    const ID_STATUS = {
-      started: () => 'started, not finished',
-      processing: () => 'being processed by Stripe',
-      failed: () => 'did not go through',
-      name_mismatch: (a) => `ID verified, but the first name on it is “${a.id_check_name}”, which isn’t a recognized spelling`,
-    };
 
     // Turns http(s) URLs in the applicant's note into links, leaving the rest as text.
     function linkify(text) {
@@ -69,7 +62,6 @@
         el('div', { class: 'evidence' },
           el('strong', {}, 'Verification evidence'),
           el('p', {}, a.verification_note ? linkify(a.verification_note) : el('span', { class: 'tag' }, 'None given.')),
-          ID_STATUS[a.id_check_status] && el('p', {}, el('strong', {}, 'ID check: '), ID_STATUS[a.id_check_status](a)),
           el('p', {}, el('strong', {}, 'Vouches: '),
             a.vouchers.length
               ? a.vouchers.map((v, i) => [i ? ', ' : '', el('a', { href: `/caleb?n=${v.number}` }, `${fullName(v)} (No. ${v.number})`)])

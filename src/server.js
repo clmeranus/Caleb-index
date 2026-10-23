@@ -4,10 +4,9 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./db');
-const { stripeIdentity, verifyWebhook } = require('./identity');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-const MAX_BODY = 64 * 1024;
+const MAX_BODY = 16 * 1024;
 const SESSION_COOKIE = 'sid';
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MIME = {
@@ -173,9 +172,6 @@ function createServer({
   db,
   secureCookies = process.env.COOKIE_SECURE === '1',
   vouchesRequired = Number(process.env.VOUCHES_REQUIRED) || 2,
-  identity = process.env.STRIPE_SECRET_KEY ? stripeIdentity({ secretKey: process.env.STRIPE_SECRET_KEY }) : null,
-  webhookSecret = process.env.STRIPE_WEBHOOK_SECRET,
-  publicUrl = process.env.PUBLIC_URL,
   registerLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
   loginLimit = rateLimiter({ max: 10, windowMs: 15 * 60 * 1000 }),
 } = {}) {
@@ -213,12 +209,6 @@ function createServer({
     return m;
   }
 
-  function requireApplicant(ctx) {
-    const m = requireMember(ctx);
-    if (m.status === 'verified') throw new HttpError(400, 'Your name is already verified.');
-    return m;
-  }
-
   // An account as its owner sees it, with vouching progress while they wait.
   function me(member) {
     return member.status === 'verified'
@@ -233,13 +223,6 @@ function createServer({
     return member;
   }
 
-  async function refreshIdCheck(member) {
-    const row = db.prepare('SELECT id_check_session FROM members WHERE id = ?').get(member.id);
-    if (!identity || !row || !row.id_check_session) return member;
-    const result = await identity.getSession(row.id_check_session);
-    return store.recordIdCheck(db, member.id, result);
-  }
-
   function validated({ value, errors }) {
     if (errors) throw new HttpError(422, 'Please fix the highlighted fields.', errors);
     return value;
@@ -248,7 +231,7 @@ function createServer({
   const routes = {
     'GET /api/spellings': () => Object.values(store.SPELLINGS),
 
-    'GET /api/config': () => ({ idCheck: Boolean(identity), vouchesRequired }),
+    'GET /api/config': () => ({ vouchesRequired }),
 
     'POST /api/auth/register': async (ctx) => {
       if (!registerLimit(ctx.ip)) throw new HttpError(429, 'Too many sign-ups from here. Try again later.');
@@ -375,38 +358,6 @@ function createServer({
       return { vouch_count: store.vouchCount(db, applicant.id) };
     },
 
-    'POST /api/me/id-check': async (ctx) => {
-      const m = requireApplicant(ctx);
-      if (!identity) throw new HttpError(404, 'ID checks are not enabled on this site.');
-      const base = publicUrl || `http://${ctx.req.headers.host}`;
-      const session = await identity.createSession({ memberId: m.id, returnUrl: `${base}/pending?id_check=done` });
-      store.startIdCheck(db, m.id, session.id);
-      return { url: session.url };
-    },
-
-    'POST /api/me/id-check/refresh': async (ctx) => {
-      const m = requireMember(ctx);
-      return { member: me(await refreshIdCheck(m)) };
-    },
-
-    // Stripe calls this when an ID check finishes, so results arrive even if the
-    // member never comes back to the site.
-    'POST /api/webhooks/stripe': async (ctx) => {
-      if (!identity || !webhookSecret) throw new HttpError(404, 'Not found.');
-      let event;
-      try {
-        event = verifyWebhook(ctx.rawBody, ctx.req.headers['stripe-signature'], webhookSecret);
-      } catch (err) {
-        throw new HttpError(400, err.message);
-      }
-      const session = event.data && event.data.object;
-      if (String(event.type).startsWith('identity.verification_session.') && session && session.id) {
-        const member = store.memberForIdSession(db, session.id);
-        if (member) await refreshIdCheck(member);
-      }
-      return { received: true };
-    },
-
     'GET /api/stats': (ctx) => {
       requireVerified(ctx);
       return store.stats(db);
@@ -457,8 +408,7 @@ function createServer({
       if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
         throw new HttpError(415, 'Requests must be sent as application/json.');
       }
-      ctx.rawBody = await readBody(req);
-      ctx.body = parseJson(ctx.rawBody);
+      ctx.body = parseJson(await readBody(req));
     }
     const result = await found.handler(ctx);
     const { status, body } = result instanceof Reply ? result : new Reply(200, result);

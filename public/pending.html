@@ -22,39 +22,6 @@
   <script src="/common.js"></script>
   <script>
     const main = document.getElementById('main');
-    let config = { idCheck: false, vouchesRequired: 2 };
-
-    const ID_MESSAGES = {
-      started: 'You started an ID check but haven’t finished it yet.',
-      processing: 'Your ID is being checked. This usually takes a minute or two. Refresh this page to see the result.',
-      failed: 'Your ID check didn’t go through. You can try again.',
-      name_mismatch: 'Your ID was checked, but the first name on it isn’t a recognized spelling of Caleb. An admin will review your application.',
-    };
-
-    function idCheckOption(m) {
-      const out = el('div');
-      const button = el('button', { class: 'btn', type: 'button' },
-        m.id_check_status === 'failed' || m.id_check_status === 'started' ? 'Try the ID check again' : 'Verify with ID');
-      button.addEventListener('click', async () => {
-        button.disabled = true;
-        try {
-          const { url } = await api('/api/me/id-check', { method: 'POST' });
-          location.href = url;
-        } catch (err) {
-          out.replaceChildren(errorBox(err));
-          button.disabled = false;
-        }
-      });
-      const busy = m.id_check_status === 'processing' || m.id_check_status === 'name_mismatch';
-      return el('section', { class: 'panel' },
-        el('h3', {}, 'Instant: ID check'),
-        el('p', {}, 'Scan a government ID and take a selfie. If the first name on your ID is Caleb (or a recognized spelling), you’re approved straight away. The check is run by Stripe; this site never sees or stores your ID, only the first name on it.'),
-        ID_MESSAGES[m.id_check_status] && el('p', { class: 'tag' }, ID_MESSAGES[m.id_check_status]),
-        !busy && button,
-        out
-      );
-    }
-
     function vouchOption(m) {
       const n = m.vouch_count || 0;
       const need = m.vouches_required;
@@ -105,12 +72,10 @@
           ? el('div', {},
               el('p', { class: 'lede' }, 'An admin could not confirm your name from the details you gave.'),
               m.review_note && el('div', { class: 'panel' }, el('strong', {}, 'Reviewer’s note: '), m.review_note),
-              el('p', { class: 'lede', style: 'margin-top:16px' },
-                config.idCheck ? 'You can verify with ID, or add more detail below and resubmit.' : 'You can add more detail below and resubmit.')
+              el('p', { class: 'lede', style: 'margin-top:16px' }, 'You can add more detail below and resubmit.')
             )
-          : el('p', { class: 'lede' }, 'Get verified in any of the ways below. Once you are, you’ll get your Caleb Number and full access to the Index.'),
+          : el('p', { class: 'lede' }, 'Get verified in either of the ways below. Once you are, you’ll get your Caleb Number and full access to the Index.'),
         el('div', { class: 'options' },
-          config.idCheck && idCheckOption(m),
           !rejected && vouchOption(m),
           !rejected && reviewOption()
         ),
@@ -122,16 +87,6 @@
     (async () => {
       const m = await initNav('/pending');
       if (!m) return (location.href = '/login');
-      config = await api('/api/config').catch(() => config);
-      // Coming back from the ID check: fetch the result straight away.
-      if (new URLSearchParams(location.search).has('id_check')) {
-        history.replaceState(null, '', '/pending');
-        try {
-          const { member } = await api('/api/me/id-check/refresh', { method: 'POST' });
-          if (member.status === 'verified') return (location.href = '/?welcome=1');
-          return render(member);
-        } catch {}
-      }
       render(m);
     })();
   </script>
