@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for caleb-index on 2026-10-23T01:01:26Z
+# fly.toml app configuration file generated for caleb-index on 2026-10-24T00:30:11Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'caleb-index'
-primary_region = 'ams'
+primary_region = 'ord'
 kill_signal = 'SIGINT'
 kill_timeout = '5s'
 
