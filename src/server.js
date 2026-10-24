@@ -291,6 +291,11 @@ function createServer({
       const value = validated(store.validateProfile(ctx.body, { partial: true }));
       const updated = store.updateProfile(db, m.id, value);
       if (m.status === 'rejected') store.resubmit(db, m.id);
+      // A verified account without a listing (the owner, created from settings)
+      // joins the index with the next Caleb Number once it adds its name.
+      if (updated.status === 'verified' && updated.number === null && updated.spelling) {
+        store.verify(db, m.id, updated.verification_method);
+      }
       return { member: me(store.account(db, updated.id)) };
     },
 

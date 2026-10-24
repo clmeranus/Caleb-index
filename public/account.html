@@ -26,11 +26,17 @@
     function profileSection(m) {
       const out = el('div');
       const form = el('form', { class: 'register', novalidate: true }, ...profileFields(m), out,
-        el('div', {}, el('button', { class: 'btn', type: 'submit' }, 'Save listing')));
+        el('div', {}, el('button', { class: 'btn', type: 'submit' }, m.number ? 'Save listing' : 'Create listing')));
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         try {
-          await api('/api/me', { method: 'PATCH', body: Object.fromEntries(new FormData(form)) });
+          const { member } = await api('/api/me', { method: 'PATCH', body: Object.fromEntries(new FormData(form)) });
+          if (member.number && !m.number) {
+            // A brand-new listing: show the account page again with its Caleb Number.
+            render(member, `You're in the Index as ${calebNumber(member.number)}.`);
+            window.scrollTo(0, 0);
+            return;
+          }
           out.replaceChildren(noticeBox('Your listing has been saved.'));
         } catch (err) {
           out.replaceChildren(errorBox(err));
@@ -94,19 +100,27 @@
       return form;
     }
 
-    initNav('/account').then((m) => {
-      if (!m) return (location.href = '/login');
+    function render(m, notice) {
       main.replaceChildren(...[
+        notice && noticeBox(notice),
         el('h1', {}, 'Your account'),
         el('p', { class: 'lede' },
           `Logged in as ${m.username}. `,
           m.number && el('a', { href: `/caleb?n=${m.number}` }, `View your listing (${calebNumber(m.number)})`)),
-        m.spelling && [el('h2', {}, 'Your listing'), profileSection(m)],
+        m.number
+          ? [el('h2', {}, 'Your listing'), profileSection(m)]
+          : [
+              el('h2', {}, 'Create your listing'),
+              el('p', { class: 'hint' }, 'Your account doesn’t have a Caleb listing yet. Add one to appear in the Index with the next Caleb Number.'),
+              profileSection(m),
+            ],
         el('h2', {}, 'Password'),
         passwordSection(),
         m.role !== 'owner' && [el('h2', {}, 'Delete account'), deleteSection()],
       ].flat().filter(Boolean));
-    });
+    }
+
+    initNav('/account').then((m) => (m ? render(m) : (location.href = '/login')));
   </script>
 </body>
 </html>

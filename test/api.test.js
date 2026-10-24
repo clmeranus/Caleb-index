@@ -347,3 +347,33 @@ test('health check', async () => {
   assert.equal(res.status, 200);
   assert.equal(await res.text(), 'ok');
 });
+
+test('the owner can create a Caleb listing and joins the index', async () => {
+  const owner = await login('admin', 'admin-password-123');
+  const before = (await owner('/api/me')).body.member;
+  assert.equal(before.number, null);
+
+  // Saving other details alone does not create a listing.
+  const noName = await owner('/api/me', { method: 'PATCH', body: { location: 'Boston' } });
+  assert.equal(noName.body.member.number, null);
+
+  const res = await owner('/api/me', { method: 'PATCH', body: { first_name: 'Caleb', surname: 'Owner' } });
+  const after = res.body.member;
+  assert.ok(after.number > 0);
+  assert.equal(after.status, 'verified');
+  assert.equal(after.role, 'owner');
+  assert.equal(after.verification_method, 'owner');
+
+  const listing = (await owner(`/api/calebs/${after.number}`)).body;
+  assert.equal(listing.surname, 'Owner');
+  assert.equal(listing.is_admin, 1);
+  assert.equal(listing.is_owner, 1);
+
+  // Later edits keep the same number.
+  const edited = await owner('/api/me', { method: 'PATCH', body: { first_name: 'Kaleb' } });
+  assert.equal(edited.body.member.number, after.number);
+
+  // With a listing, the owner can vouch like any member.
+  const applicant = await apply();
+  assert.equal((await owner(`/api/applicants/${applicant.res.body.member.id}/vouch`, { method: 'POST' })).status, 200);
+});
