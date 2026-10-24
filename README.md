@@ -76,6 +76,8 @@ The repository includes [`fly.toml`](fly.toml) and a `Dockerfile`.
 1. **Owner account.** In the Fly dashboard, open the app's **Secrets** and add
    `ADMIN_USERNAME` and `ADMIN_PASSWORD`, or run
    `fly secrets set ADMIN_USERNAME=you ADMIN_PASSWORD='a long password'`.
+   The password must be at least 10 characters. If the owner can't be set up, the
+   reason appears in the app's logs and the site keeps running without it.
 2. **Deploy** with the dashboard's **Deploy app** button, or `fly deploy`. The first
    deploy creates the `caleb_data` volume that holds the database.
 3. **One machine only.** The database is a file on a volume, and a volume belongs to a

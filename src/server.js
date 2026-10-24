@@ -471,8 +471,14 @@ if (require.main === module) {
     const port = Number(process.env.PORT) || 3000;
     const db = store.open(process.env.DATABASE_PATH || path.join(__dirname, '..', 'calebs.db'));
     if (process.env.ADMIN_USERNAME) {
-      const admin = await store.ensureAdmin(db, process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD);
-      console.log(`Admin account: ${admin.username}`);
+      // A bad owner setting is logged, not fatal: the site keeps running and the
+      // owner account is created on the next restart once the setting is fixed.
+      try {
+        const admin = await store.ensureAdmin(db, process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD);
+        console.log(`Admin account: ${admin.username}`);
+      } catch (err) {
+        console.error(`Could not set up the owner account "${process.env.ADMIN_USERNAME}": ${err.message}`);
+      }
     } else {
       console.warn('ADMIN_USERNAME is not set: nobody will be able to verify new members.');
     }
