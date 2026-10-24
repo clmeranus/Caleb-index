@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Email settings · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site"><a href="/login">Log in</a></nav>
+    </div>
+  </header>
+
+  <main class="wrap narrow" id="main"></main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    // Opened from a link in an email. The link alone changes nothing: some email
+    // apps open links to scan them, so the member has to press the button.
+    const params = new URLSearchParams(location.search);
+    const token = params.get('t') || '';
+    const action = params.get('action') === 'unsubscribe' ? 'unsubscribe' : 'confirm';
+    const main = document.getElementById('main');
+    const copy = {
+      confirm: {
+        title: 'Confirm your email',
+        text: 'Confirm this address to get email notifications from The Caleb Index.',
+        button: 'Confirm my email',
+        done: (email) => `Thanks! ${email} is confirmed. You'll get email notifications from now on.`,
+      },
+      unsubscribe: {
+        title: 'Unsubscribe',
+        text: 'Stop getting email notifications from The Caleb Index. You can opt in again any time from your Account page.',
+        button: 'Unsubscribe',
+        done: (email) => `${email} is unsubscribed. You won't get any more email notifications.`,
+      },
+    }[action];
+
+    const out = el('div');
+    const button = el('button', { class: 'btn', type: 'button' }, copy.button);
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        const { email } = await api(`/api/email/${action}`, { method: 'POST', body: { token } });
+        button.remove();
+        out.replaceChildren(noticeBox(copy.done(email)));
+      } catch (err) {
+        out.replaceChildren(errorBox(err));
+        button.disabled = false;
+      }
+    });
+    main.replaceChildren(el('h1', {}, copy.title), el('p', { class: 'lede' }, copy.text), out, button);
+    // Keep the token out of the browser history.
+    history.replaceState(null, '', '/email');
+  </script>
+</body>
+</html>

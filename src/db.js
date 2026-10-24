@@ -3,6 +3,7 @@
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
+const geo = require('./geo');
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -24,6 +25,8 @@ const SPELLINGS = {
 const LIMITS = {
   surname: 60,
   location: 80,
+  region: 60,
+  postal_code: 12,
   country: 60,
   occupation: 80,
   bio: 500,
@@ -32,20 +35,23 @@ const LIMITS = {
 };
 
 const SESSION_DAYS = 30;
+const MESSAGE_LIMIT = 2000;
 const ADMIN_ROLES = ['admin', 'owner'];
 const NOW = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 // Fields any verified member may see in the directory.
 const PUBLIC_COLUMNS =
-  "number, spelling, surname, location, country, birth_year, occupation, bio, website, verified_at AS created_at, updated_at, " +
+  "number, spelling, surname, location, region, country, birth_year, occupation, bio, website, verified_at AS created_at, updated_at, " +
   "role IN ('admin', 'owner') AS is_admin, role = 'owner' AS is_owner";
 
 // Fields verified members see about applicants, so they can decide whether to vouch.
-const APPLICANT_COLUMNS = 'id, spelling, surname, location, country, birth_year, occupation, bio, website, created_at';
+const APPLICANT_COLUMNS = 'id, spelling, surname, location, region, country, birth_year, occupation, bio, website, created_at';
 
 // Fields a member sees about their own account (and admins see when reviewing).
 const ACCOUNT_COLUMNS =
-  'id, username, role, status, review_note, verification_note, verification_method, number, spelling, surname, location, country, birth_year, occupation, bio, website, created_at, updated_at, verified_at';
+  'id, username, role, status, review_note, verification_note, verification_method, number, spelling, surname, location, region, postal_code, ' +
+  'country, birth_year, occupation, bio, website, created_at, updated_at, verified_at, latitude IS NOT NULL AS has_location, ' +
+  'email, email_opt_in, email_confirmed';
 
 function open(file = ':memory:') {
   const db = new DatabaseSync(file);
@@ -85,8 +91,49 @@ function open(file = ':memory:') {
       created_at   TEXT NOT NULL DEFAULT (${NOW}),
       PRIMARY KEY (applicant_id, voucher_id)
     );
+    CREATE TABLE IF NOT EXISTS messages (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender_id     INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      recipient_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      body          TEXT NOT NULL,
+      created_at    TEXT NOT NULL DEFAULT (${NOW}),
+      read_at       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS messages_by_recipient ON messages (recipient_id, read_at);
+    CREATE INDEX IF NOT EXISTS messages_by_pair ON messages (sender_id, recipient_id, id);
+    CREATE TABLE IF NOT EXISTS announcements (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender_id     INTEGER REFERENCES members(id) ON DELETE SET NULL,
+      subject       TEXT NOT NULL,
+      body          TEXT NOT NULL,
+      emailed       INTEGER NOT NULL DEFAULT 0,
+      email_sent    INTEGER NOT NULL DEFAULT 0,
+      email_failed  INTEGER NOT NULL DEFAULT 0,
+      created_at    TEXT NOT NULL DEFAULT (${NOW})
+    );
   `);
+  migrate(db);
   return db;
+}
+
+// Columns added after the first release. Existing databases gain them the next
+// time the app starts; values already stored are left untouched.
+const ADDED_COLUMNS = {
+  region: "TEXT NOT NULL DEFAULT ''",
+  postal_code: "TEXT NOT NULL DEFAULT ''",
+  latitude: 'REAL',
+  longitude: 'REAL',
+  email: "TEXT NOT NULL DEFAULT ''",
+  email_opt_in: 'INTEGER NOT NULL DEFAULT 0',
+  email_confirmed: 'INTEGER NOT NULL DEFAULT 0',
+  email_token: 'TEXT',
+};
+
+function migrate(db) {
+  const existing = new Set(db.prepare('PRAGMA table_info(members)').all().map((c) => c.name));
+  for (const [column, definition] of Object.entries(ADDED_COLUMNS)) {
+    if (!existing.has(column)) db.exec(`ALTER TABLE members ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 const plain = (row) => (row ? { ...row } : null);
@@ -151,6 +198,13 @@ function validateProfile(input, { partial = false } = {}) {
     const s = String(input[field]).trim();
     if (s.length > max) errors.push(`${field} must be at most ${max} characters.`);
     value[field] = s;
+  }
+
+  if (value.postal_code !== undefined) {
+    value.postal_code = geo.normalizePostalCode(value.postal_code);
+    const place = value.postal_code ? geo.locate(value.postal_code) : null;
+    value.latitude = place ? place.lat : null;
+    value.longitude = place ? place.lon : null;
   }
 
   if (value.website && !/^https?:\/\/[^\s]+$/i.test(value.website)) {
@@ -384,10 +438,11 @@ function list(db, { q = '', spelling = '', country = '', sort = 'number', limit 
   const where = [LISTED];
   const params = [];
   if (q) {
-    where.push(`(surname LIKE ? ESCAPE '\\' OR location LIKE ? ESCAPE '\\' OR country LIKE ? ESCAPE '\\'
-                 OR occupation LIKE ? ESCAPE '\\' OR bio LIKE ? ESCAPE '\\')`);
-    const like = `%${String(q).replace(/[\\%_]/g, (c) => '\\' + c)}%`;
-    params.push(like, like, like, like, like);
+    const number = String(q).trim().match(/^(?:no\.?\s*|#)?(\d+)$/i);
+    where.push(`(spelling || ' ' || surname LIKE ? ESCAPE '\\' OR location LIKE ? ESCAPE '\\' OR region LIKE ? ESCAPE '\\'
+                 OR country LIKE ? ESCAPE '\\' OR occupation LIKE ? ESCAPE '\\' OR bio LIKE ? ESCAPE '\\' OR number = ?)`);
+    const like = `%${String(q).trim().replace(/[\\%_]/g, (c) => '\\' + c)}%`;
+    params.push(like, like, like, like, like, like, number ? Number(number[1]) : -1);
   }
   if (spelling) {
     where.push('spelling = ?');
@@ -439,6 +494,145 @@ function stats(db) {
   };
 }
 
+// --- Messages --------------------------------------------------------------
+
+// The other member in a conversation, as the directory shows them.
+const PARTNER_COLUMNS = 'm.id, m.number, m.spelling, m.surname, m.location, m.region, m.country';
+
+function sendMessage(db, senderId, recipientId, body) {
+  const { lastInsertRowid } = db
+    .prepare('INSERT INTO messages (sender_id, recipient_id, body) VALUES (?, ?, ?)')
+    .run(senderId, recipientId, body);
+  return plain(db.prepare('SELECT id, sender_id, recipient_id, body, created_at, read_at FROM messages WHERE id = ?').get(lastInsertRowid));
+}
+
+// One row per person the member has exchanged messages with, newest first.
+function conversations(db, memberId) {
+  return db
+    .prepare(
+      `WITH mine AS (
+         SELECT id, body, created_at, sender_id, read_at, recipient_id,
+                CASE WHEN sender_id = ? THEN recipient_id ELSE sender_id END AS other_id
+         FROM messages WHERE sender_id = ? OR recipient_id = ?
+       ), latest AS (SELECT other_id, MAX(id) AS last_id FROM mine GROUP BY other_id)
+       SELECT ${PARTNER_COLUMNS}, last.body AS last_body, last.created_at AS last_at, last.sender_id = ? AS last_from_me,
+              (SELECT COUNT(*) FROM mine u WHERE u.other_id = latest.other_id AND u.recipient_id = ? AND u.read_at IS NULL) AS unread
+       FROM latest
+       JOIN mine last ON last.id = latest.last_id
+       JOIN members m ON m.id = latest.other_id
+       ORDER BY latest.last_id DESC`
+    )
+    .all(memberId, memberId, memberId, memberId, memberId)
+    .map(plain);
+}
+
+// Messages between two members, oldest first. Marks the ones sent to the reader as read.
+function thread(db, memberId, otherId, { limit = 200 } = {}) {
+  db.prepare(`UPDATE messages SET read_at = ${NOW} WHERE recipient_id = ? AND sender_id = ? AND read_at IS NULL`).run(memberId, otherId);
+  return db
+    .prepare(
+      `SELECT * FROM (
+         SELECT id, body, created_at, read_at, sender_id = ? AS from_me FROM messages
+         WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+         ORDER BY id DESC LIMIT ?
+       ) ORDER BY id`
+    )
+    .all(memberId, memberId, otherId, otherId, memberId, limit)
+    .map(plain);
+}
+
+function unreadCount(db, memberId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM messages WHERE recipient_id = ? AND read_at IS NULL').get(memberId).n;
+}
+
+// --- Calebs near you -------------------------------------------------------
+
+// Listed members who have a known location, with their coordinates.
+function locatedMembers(db) {
+  return db
+    .prepare(`SELECT id, latitude, longitude, ${PUBLIC_COLUMNS} FROM members WHERE ${LISTED} AND latitude IS NOT NULL`)
+    .all()
+    .map(plain);
+}
+
+function location(db, id) {
+  const row = db.prepare('SELECT latitude AS lat, longitude AS lon FROM members WHERE id = ? AND latitude IS NOT NULL').get(id);
+  return row ? { lat: row.lat, lon: row.lon } : null;
+}
+
+// --- Email -----------------------------------------------------------------
+
+// Saves a member's email settings. A new address must be confirmed again, so it
+// gets a fresh token; the result says whether a confirmation email is needed.
+function setEmail(db, id, { email, optIn }) {
+  const current = account(db, id);
+  const changed = email !== current.email;
+  if (changed) {
+    db.prepare(
+      `UPDATE members SET email = ?, email_confirmed = 0, email_token = ?, updated_at = ${NOW} WHERE id = ?`
+    ).run(email, email ? crypto.randomBytes(24).toString('base64url') : null, id);
+  }
+  db.prepare('UPDATE members SET email_opt_in = ? WHERE id = ?').run(optIn && email ? 1 : 0, id);
+  const updated = account(db, id);
+  return { member: updated, needsConfirmation: Boolean(updated.email && updated.email_opt_in && !updated.email_confirmed) };
+}
+
+function emailToken(db, id) {
+  const row = db.prepare('SELECT email_token FROM members WHERE id = ?').get(id);
+  return row ? row.email_token : null;
+}
+
+// Confirms the address the token was issued for. Returns the member, or null.
+function confirmEmail(db, token) {
+  const row = db.prepare("SELECT id FROM members WHERE email_token = ? AND email != ''").get(String(token ?? ''));
+  if (!row) return null;
+  db.prepare('UPDATE members SET email_confirmed = 1 WHERE id = ?').run(row.id);
+  return account(db, row.id);
+}
+
+function unsubscribe(db, token) {
+  const row = db.prepare('SELECT id FROM members WHERE email_token = ?').get(String(token ?? ''));
+  if (!row) return null;
+  db.prepare('UPDATE members SET email_opt_in = 0 WHERE id = ?').run(row.id);
+  return account(db, row.id);
+}
+
+// Verified members who opted in and confirmed their address.
+function emailRecipients(db) {
+  return db
+    .prepare(
+      `SELECT id, email, email_token AS token, spelling FROM members
+       WHERE status = 'verified' AND email != '' AND email_opt_in = 1 AND email_confirmed = 1 AND email_token IS NOT NULL`
+    )
+    .all()
+    .map(plain);
+}
+
+// --- Announcements ---------------------------------------------------------
+
+function createAnnouncement(db, { senderId, subject, body, emailed }) {
+  const { lastInsertRowid } = db
+    .prepare('INSERT INTO announcements (sender_id, subject, body, emailed) VALUES (?, ?, ?, ?)')
+    .run(senderId, subject, body, emailed ? 1 : 0);
+  return Number(lastInsertRowid);
+}
+
+function recordEmailResult(db, announcementId, { sent, failed }) {
+  db.prepare('UPDATE announcements SET email_sent = ?, email_failed = ? WHERE id = ?').run(sent, failed, announcementId);
+}
+
+function announcements(db, { limit = 20 } = {}) {
+  return db
+    .prepare(
+      `SELECT a.id, a.subject, a.body, a.created_at, a.emailed, a.email_sent, a.email_failed,
+              m.number AS sender_number, m.spelling AS sender_spelling, m.surname AS sender_surname
+       FROM announcements a LEFT JOIN members m ON m.id = a.sender_id
+       ORDER BY a.id DESC LIMIT ?`
+    )
+    .all(limit)
+    .map(plain);
+}
+
 module.exports = {
   SPELLINGS,
   isAdmin,
@@ -473,4 +667,19 @@ module.exports = {
   idForNumber,
   list,
   stats,
+  MESSAGE_LIMIT,
+  sendMessage,
+  conversations,
+  thread,
+  unreadCount,
+  locatedMembers,
+  location,
+  setEmail,
+  emailToken,
+  confirmEmail,
+  unsubscribe,
+  emailRecipients,
+  createAnnouncement,
+  recordEmailResult,
+  announcements,
 };

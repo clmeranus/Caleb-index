@@ -52,15 +52,20 @@ async function initNav(current) {
     member.status === 'verified'
       ? [
           ['/', 'Index'],
+          ['/nearby', 'Near you'],
+          ['/messages', 'Messages', member.unread_messages],
           ['/stats', 'Statistics'],
           ['/applicants', 'Applicants'],
           isAdmin(member) && ['/admin', 'Review'],
+          isAdmin(member) && ['/notify', 'Notify'],
           ['/account', 'Account'],
         ]
       : [['/pending', 'Application']];
   nav.replaceChildren(
-    ...links.filter(Boolean).map(([href, label]) =>
-      el('a', { href, 'aria-current': href === current ? 'page' : null }, label)
+    ...links.filter(Boolean).map(([href, label, count]) =>
+      el('a', { href, 'aria-current': href === current ? 'page' : null },
+        label,
+        count ? el('span', { class: 'count', 'aria-label': `${count} unread` }, count) : null)
     ),
     el('button', { class: 'link', type: 'button', onclick: logout }, 'Log out')
   );
@@ -76,7 +81,7 @@ function fullName(c) {
 }
 
 function place(c) {
-  return [c.location, c.country].filter(Boolean).join(', ');
+  return [c.location, c.region, c.country].filter(Boolean).join(', ');
 }
 
 function calebNumber(n) {
@@ -96,6 +101,11 @@ function noticeBox(text) {
   return el('div', { class: 'panel success', role: 'status' }, text);
 }
 
+// A link to start or continue a conversation with a member.
+function messageButton(c, { ghost = false } = {}) {
+  return el('a', { class: ghost ? 'btn ghost small' : 'btn small', href: `/messages?to=${c.number}` }, 'Message');
+}
+
 function calebCard(c) {
   return el(
     'a',
@@ -110,7 +120,9 @@ function calebCard(c) {
 const PROFILE_FIELDS = [
   { name: 'first_name', label: 'First name *', hint: 'Caleb, Kaleb, Calev, Cayleb, and similar spellings are welcome.', attrs: { required: true, autocomplete: 'given-name' } },
   { name: 'surname', label: 'Surname', hint: 'Optional. An initial works too.', attrs: { maxlength: 60, autocomplete: 'family-name' } },
-  { name: 'location', label: 'Town or city', attrs: { maxlength: 80 } },
+  { name: 'location', label: 'Town or city', attrs: { maxlength: 80, autocomplete: 'address-level2' } },
+  { name: 'region', label: 'State / province', attrs: { maxlength: 60, autocomplete: 'address-level1' } },
+  { name: 'postal_code', label: 'ZIP / postal code', hint: 'Private. Only used to find Calebs near you (US ZIP codes for now).', attrs: { maxlength: 12, autocomplete: 'postal-code' } },
   { name: 'country', label: 'Country', attrs: { maxlength: 60, autocomplete: 'country-name' } },
   { name: 'birth_year', label: 'Birth year', attrs: { inputmode: 'numeric', maxlength: 4, placeholder: 'e.g. 1996' } },
   { name: 'occupation', label: 'Occupation', attrs: { maxlength: 80 } },
@@ -139,7 +151,8 @@ function profileFields(member = {}) {
   const f = (name) => field(PROFILE_FIELDS.find((x) => x.name === name), values[name]);
   return [
     el('div', { class: 'row' }, f('first_name'), f('surname')),
-    el('div', { class: 'row' }, f('location'), f('country')),
+    el('div', { class: 'row' }, f('location'), f('region')),
+    el('div', { class: 'row' }, f('postal_code'), f('country')),
     el('div', { class: 'row' }, f('birth_year'), f('occupation')),
     f('bio'),
     f('website'),

@@ -4,6 +4,8 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./db');
+const geo = require('./geo');
+const { mailerFromEnv } = require('./mail');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MAX_BODY = 16 * 1024;
@@ -27,7 +29,11 @@ const PAGES = {
   '/caleb': 'member',
   '/account': 'member',
   '/applicants': 'member',
+  '/messages': 'member',
+  '/nearby': 'member',
   '/admin': 'admin',
+  '/notify': 'admin',
+  '/email': 'public',
 };
 
 class HttpError extends Error {
@@ -190,6 +196,10 @@ function createServer({
   secureCookies = process.env.COOKIE_SECURE === '1',
   vouchesRequired = Number(process.env.VOUCHES_REQUIRED) || 2,
   proxy = { header: process.env.CLIENT_IP_HEADER, hops: Number(process.env.TRUST_PROXY_HOPS) || 0 },
+  mailer = mailerFromEnv(),
+  publicUrl = process.env.PUBLIC_URL,
+  messageLimit = rateLimiter({ max: 60, windowMs: 60 * 60 * 1000 }),
+  confirmationLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
   registerLimit = rateLimiter({ max: 5, windowMs: 60 * 60 * 1000 }),
   loginLimit = rateLimiter({ max: 10, windowMs: 15 * 60 * 1000 }),
 } = {}) {
@@ -230,8 +240,71 @@ function createServer({
   // An account as its owner sees it, with vouching progress while they wait.
   function me(member) {
     return member.status === 'verified'
-      ? member
+      ? { ...member, unread_messages: store.unreadCount(db, member.id), email_available: Boolean(mailer) }
       : { ...member, vouch_count: store.vouchCount(db, member.id), vouches_required: vouchesRequired };
+  }
+
+  // Messaging needs a listing, so the other person can see who wrote and reply.
+  function requireListed(ctx) {
+    const m = requireVerified(ctx);
+    if (m.number === null) throw new HttpError(403, 'Create your Caleb listing on the Account page first.');
+    return m;
+  }
+
+  // The site's address, for links in emails.
+  function siteUrl(ctx) {
+    return (publicUrl || `${secureCookies ? 'https' : 'http'}://${ctx.req.headers.host}`).replace(/\/+$/, '');
+  }
+
+  function emailLink(ctx, action, token) {
+    return `${siteUrl(ctx)}/email?action=${action}&t=${encodeURIComponent(token)}`;
+  }
+
+  async function sendConfirmation(ctx, member) {
+    if (!mailer) return 'unavailable';
+    if (!confirmationLimit(String(member.id))) throw new HttpError(429, 'Too many confirmation emails. Try again later.');
+    await mailer.send({
+      to: member.email,
+      subject: 'Confirm your email for The Caleb Index',
+      text:
+        `Hi ${member.spelling || member.username},\n\n` +
+        `Please confirm this address to get email notifications from The Caleb Index:\n\n` +
+        `${emailLink(ctx, 'confirm', store.emailToken(db, member.id))}\n\n` +
+        `If you didn't ask for this, you can ignore this email and you won't hear from us.`,
+    });
+    return 'sent';
+  }
+
+  // Emails an announcement to every confirmed, opted-in member, one at a time, and
+  // records how many were delivered. Runs after the request has been answered.
+  async function emailAnnouncement(ctx, id, { subject, body }) {
+    let sent = 0;
+    let failed = 0;
+    for (const r of store.emailRecipients(db)) {
+      const unsubscribeUrl = emailLink(ctx, 'unsubscribe', r.token);
+      try {
+        await mailer.send({
+          to: r.email,
+          subject,
+          text:
+            `${body}\n\n--\nYou're receiving this because you opted in to email notifications ` +
+            `from The Caleb Index.\nUnsubscribe: ${unsubscribeUrl}`,
+          headers: { 'List-Unsubscribe': `<${unsubscribeUrl}>` },
+        });
+        sent += 1;
+      } catch (err) {
+        failed += 1;
+        console.error(`Announcement ${id}: could not email member ${r.id}: ${err.message}`);
+      }
+      store.recordEmailResult(db, id, { sent, failed });
+    }
+  }
+
+  function textField(value, name, max) {
+    const s = String(value ?? '').trim();
+    if (!s) throw new HttpError(422, 'Please fix the highlighted fields.', [`${name} is required.`]);
+    if (s.length > max) throw new HttpError(422, 'Please fix the highlighted fields.', [`${name} must be at most ${max} characters.`]);
+    return s;
   }
 
   function memberByNumber(raw) {
@@ -379,6 +452,100 @@ function createServer({
       const applicant = store.unvouch(db, parseNumber(ctx.param), m.id);
       if (!applicant) throw new HttpError(404, 'No pending applicant with that id.');
       return { vouch_count: store.vouchCount(db, applicant.id) };
+    },
+
+    'PUT /api/me/email': async (ctx) => {
+      const m = requireVerified(ctx);
+      const email = String(ctx.body.email ?? '').trim();
+      if (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        throw new HttpError(422, 'Please fix the highlighted fields.', ['email must be a valid email address.']);
+      }
+      const { member, needsConfirmation } = store.setEmail(db, m.id, { email, optIn: ctx.body.opt_in === true });
+      const confirmation = needsConfirmation ? await sendConfirmation(ctx, member) : 'not_needed';
+      return { member: me(member), confirmation };
+    },
+
+    'POST /api/me/email/confirmation': async (ctx) => {
+      const m = requireVerified(ctx);
+      if (!m.email || !m.email_opt_in || m.email_confirmed) throw new HttpError(400, 'There is nothing to confirm.');
+      return { confirmation: await sendConfirmation(ctx, m) };
+    },
+
+    // Links in emails land on /email, which posts the token here. No login needed.
+    'POST /api/email/confirm': (ctx) => {
+      const member = store.confirmEmail(db, ctx.body.token);
+      if (!member) throw new HttpError(404, 'That confirmation link is no longer valid.');
+      return { email: member.email };
+    },
+
+    'POST /api/email/unsubscribe': (ctx) => {
+      const member = store.unsubscribe(db, ctx.body.token);
+      if (!member) throw new HttpError(404, 'That unsubscribe link is no longer valid.');
+      return { email: member.email };
+    },
+
+    'GET /api/messages': (ctx) => {
+      const m = requireVerified(ctx);
+      return { conversations: store.conversations(db, m.id), unread: store.unreadCount(db, m.id) };
+    },
+
+    'GET /api/messages/:n': (ctx) => {
+      const m = requireVerified(ctx);
+      const other = memberByNumber(ctx.param);
+      return { with: store.get(db, other.number), messages: store.thread(db, m.id, other.id) };
+    },
+
+    'POST /api/messages/:n': (ctx) => {
+      const m = requireListed(ctx);
+      const other = memberByNumber(ctx.param);
+      if (other.id === m.id) throw new HttpError(400, 'You cannot message yourself.');
+      const body = textField(ctx.body.body, 'message', store.MESSAGE_LIMIT);
+      if (!messageLimit(String(m.id))) throw new HttpError(429, 'You are sending messages too quickly. Try again later.');
+      return new Reply(201, { message: { ...store.sendMessage(db, m.id, other.id, body), from_me: 1 } });
+    },
+
+    'GET /api/nearby': (ctx) => {
+      const m = requireVerified(ctx);
+      const radius = Number(ctx.url.searchParams.get('radius'));
+      if (![5, 10, 25].includes(radius)) throw new HttpError(422, 'radius must be 5, 10 or 25 miles.');
+      const here = store.location(db, m.id);
+      if (!here) return { located: false, calebs: [] };
+      const calebs = store
+        .locatedMembers(db)
+        .filter((c) => c.id !== m.id)
+        .map(({ id, latitude, longitude, ...c }) => ({
+          ...c,
+          distance_miles: Math.round(geo.distanceMiles(here, { lat: latitude, lon: longitude }) * 10) / 10,
+        }))
+        .filter((c) => c.distance_miles <= radius)
+        .sort((a, b) => a.distance_miles - b.distance_miles || a.number - b.number);
+      return { located: true, calebs };
+    },
+
+    'GET /api/announcements': (ctx) => {
+      requireVerified(ctx);
+      return {
+        announcements: store.announcements(db, { limit: 10 }).map(({ emailed, email_sent, email_failed, ...a }) => a),
+      };
+    },
+
+    'GET /api/admin/announcements': (ctx) => {
+      requireAdmin(ctx);
+      return {
+        announcements: store.announcements(db),
+        email: { configured: Boolean(mailer), recipients: store.emailRecipients(db).length },
+      };
+    },
+
+    'POST /api/admin/announcements': (ctx) => {
+      const admin = requireAdmin(ctx);
+      const subject = textField(ctx.body.subject, 'subject', 150);
+      const body = textField(ctx.body.body, 'message', 5000);
+      const emailed = ctx.body.send_email === true && Boolean(mailer);
+      const id = store.createAnnouncement(db, { senderId: admin.id, subject, body, emailed });
+      const recipients = emailed ? store.emailRecipients(db).length : 0;
+      if (emailed) emailAnnouncement(ctx, id, { subject, body }).catch((err) => console.error(err));
+      return new Reply(201, { id, emailing: recipients });
     },
 
     'GET /api/stats': (ctx) => {

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Messages · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap narrow-wide" id="main"><p class="note">Loading…</p></main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const main = document.getElementById('main');
+    const to = Number(new URLSearchParams(location.search).get('to')) || null;
+    let me;
+
+    function when(iso) {
+      const d = new Date(iso);
+      const sameDay = d.toDateString() === new Date().toDateString();
+      return sameDay
+        ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+
+    // --- Inbox --------------------------------------------------------------
+
+    // "New message": find someone by Caleb Number or name.
+    function newMessageBox() {
+      const input = el('input', { type: 'search', placeholder: 'Caleb Number or name, e.g. 12 or Caleb Smith', 'aria-label': 'Find a Caleb to message', autocomplete: 'off' });
+      const results = el('div', { class: 'picker' });
+      let timer;
+      input.addEventListener('input', () => {
+        clearTimeout(timer);
+        const q = input.value.trim();
+        if (!q) return results.replaceChildren();
+        timer = setTimeout(async () => {
+          try {
+            const { calebs } = await api(`/api/calebs?limit=8&q=${encodeURIComponent(q)}`);
+            const others = calebs.filter((c) => c.number !== me.number);
+            results.replaceChildren(
+              ...(others.length
+                ? others.map((c) => el('button', { type: 'button', onclick: () => (location.href = `/messages?to=${c.number}`) },
+                    el('strong', {}, fullName(c)), ` · No. ${c.number}`, place(c) ? ` · ${place(c)}` : ''))
+                : [el('p', { class: 'hint' }, 'No Calebs match that.')])
+            );
+          } catch (err) {
+            results.replaceChildren(errorBox(err));
+          }
+        }, 200);
+      });
+      return el('section', { class: 'panel' }, el('h2', { style: 'margin-top:0' }, 'New message'), input, results);
+    }
+
+    function announcementList(items) {
+      if (!items.length) return null;
+      return [
+        el('h2', {}, 'Notifications'),
+        el('div', { class: 'inbox' }, items.slice(0, 3).map((a) =>
+          el('article', { class: 'panel announcement' },
+            el('h3', {}, a.subject),
+            el('p', {}, a.body),
+            el('p', { class: 'hint', style: 'margin-top:6px' },
+              `From ${a.sender_number ? `${a.sender_spelling} ${a.sender_surname}`.trim() : 'the admins'} · ${when(a.created_at)}`)))),
+      ];
+    }
+
+    async function showInbox() {
+      const [{ conversations }, { announcements }] = await Promise.all([api('/api/messages'), api('/api/announcements')]);
+      main.replaceChildren(...[
+        el('h1', {}, 'Messages'),
+        me.number === null
+          ? el('p', { class: 'lede' }, 'To send messages, first ', el('a', { href: '/account' }, 'create your Caleb listing'), '.')
+          : newMessageBox(),
+        announcementList(announcements),
+        el('h2', {}, 'Conversations'),
+        conversations.length
+          ? el('div', { class: 'inbox' }, conversations.map((c) =>
+              el('a', { class: `convo${c.unread ? ' unread' : ''}`, href: `/messages?to=${c.number}` },
+                el('span', { class: 'who' }, fullName(c), c.unread ? ` (${c.unread})` : ''),
+                el('span', { class: 'when' }, when(c.last_at)),
+                el('span', { class: 'preview' }, c.last_from_me ? `You: ${c.last_body}` : c.last_body))))
+          : el('p', { class: 'empty' }, 'No conversations yet. Find a Caleb above, or on the Near you page, to say hello.'),
+      ].flat().filter(Boolean));
+    }
+
+    // --- A conversation -----------------------------------------------------
+
+    async function showThread() {
+      let data;
+      try {
+        data = await api(`/api/messages/${to}`);
+      } catch {
+        main.replaceChildren(el('h1', {}, 'Caleb not found'), el('p', { class: 'note' }, el('a', { href: '/messages' }, '← Back to messages')));
+        return;
+      }
+      const other = data.with;
+      const list = el('div', { class: 'thread', 'aria-live': 'polite' });
+      const status = el('div');
+      let shown = 0;
+      const renderMessages = (messages) => {
+        list.replaceChildren(...(messages.length
+          ? messages.map((m) => el('div', { class: `bubble${m.from_me ? ' mine' : ''}` }, m.body, el('time', { datetime: m.created_at }, when(m.created_at))))
+          : [el('p', { class: 'empty' }, `This is the start of your conversation with ${fullName(other)}.`)]));
+        if (messages.length !== shown) window.scrollTo(0, document.body.scrollHeight);
+        shown = messages.length;
+      };
+
+      const box = el('textarea', { rows: 2, maxlength: 2000, placeholder: `Message ${other.spelling}…`, 'aria-label': 'Message' });
+      const send = el('button', { class: 'btn', type: 'submit' }, 'Send');
+      const form = el('form', { class: 'composer' }, box, send);
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!box.value.trim()) return;
+        send.disabled = true;
+        try {
+          await api(`/api/messages/${to}`, { method: 'POST', body: { body: box.value } });
+          box.value = '';
+          status.replaceChildren();
+          renderMessages((await api(`/api/messages/${to}`)).messages);
+        } catch (err) {
+          status.replaceChildren(errorBox(err));
+        }
+        send.disabled = false;
+        box.focus();
+      });
+      // Enter sends; Shift+Enter starts a new line.
+      box.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          form.requestSubmit();
+        }
+      });
+
+      main.replaceChildren(...[
+        el('p', {}, el('a', { href: '/messages' }, '← All messages')),
+        el('h1', {}, fullName(other)),
+        el('p', { class: 'lede' }, el('a', { href: `/caleb?n=${other.number}` }, calebNumber(other.number)), place(other) ? ` · ${place(other)}` : ''),
+        list,
+        status,
+        other.number === me.number
+          ? el('p', { class: 'hint' }, 'This is you.')
+          : me.number === null
+            ? el('p', { class: 'hint' }, 'To reply, first ', el('a', { href: '/account' }, 'create your Caleb listing'), '.')
+            : form,
+      ].filter(Boolean));
+      renderMessages(data.messages);
+      // Opening the conversation marked it read, so refresh the unread count.
+      initNav('/messages');
+
+      // Check for replies while the conversation is open.
+      setInterval(async () => {
+        if (document.hidden) return;
+        try {
+          renderMessages((await api(`/api/messages/${to}`)).messages);
+        } catch {}
+      }, 15000);
+    }
+
+    initNav('/messages').then(async (member) => {
+      if (!member) return (location.href = '/login');
+      me = member;
+      try {
+        await (to ? showThread() : showInbox());
+      } catch (err) {
+        main.replaceChildren(errorBox(err));
+      }
+    });
+  </script>
+</body>
+</html>

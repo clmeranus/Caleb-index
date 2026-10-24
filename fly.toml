@@ -15,6 +15,7 @@ kill_timeout = '5s'
   COOKIE_SECURE = '1'
   DATABASE_PATH = '/data/calebs.db'
   PORT = '8080'
+  PUBLIC_URL = 'https://caleb-index.fly.dev'
   VOUCHES_REQUIRED = '2'
 
 [[mounts]]

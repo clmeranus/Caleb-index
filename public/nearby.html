@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calebs near you · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap narrow-wide">
+    <h1>Calebs near you</h1>
+    <p class="lede" id="intro">Members within a few miles of the ZIP code on your profile.</p>
+    <div class="radius" id="radius" role="group" aria-label="Distance"></div>
+    <div id="results" class="near-list" aria-live="polite"><p class="note">Loading…</p></div>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    const RADII = [5, 10, 25];
+    const results = document.getElementById('results');
+    const radiusBox = document.getElementById('radius');
+    let me;
+    let radius = 25;
+    try { radius = Number(localStorage.getItem('nearby-radius')) || 25; } catch {}
+    if (!RADII.includes(radius)) radius = 25;
+
+    function radiusButtons() {
+      radiusBox.replaceChildren(...RADII.map((r) =>
+        el('button', {
+          type: 'button',
+          class: r === radius ? 'btn' : 'btn ghost',
+          'aria-pressed': String(r === radius),
+          onclick: () => {
+            radius = r;
+            try { localStorage.setItem('nearby-radius', r); } catch {}
+            radiusButtons();
+            load();
+          },
+        }, `${r} miles`)));
+    }
+
+    function miles(d) {
+      return d < 1 ? 'Less than a mile away' : `${d.toFixed(1)} miles away`;
+    }
+
+    async function load() {
+      try {
+        const { located, calebs } = await api(`/api/nearby?radius=${radius}`);
+        if (!located) {
+          radiusBox.hidden = true;
+          results.replaceChildren(el('div', { class: 'panel' },
+            el('p', { style: 'margin-top:0' }, me.postal_code
+              ? `We couldn't find the location of ${me.postal_code}. Distance search works with US ZIP codes for now.`
+              : 'Add your ZIP code to your profile to see Calebs near you.'),
+            el('a', { class: 'btn', href: '/account' }, me.postal_code ? 'Check your ZIP code' : 'Add your ZIP code')));
+          return;
+        }
+        radiusBox.hidden = false;
+        results.replaceChildren(...(calebs.length
+          ? calebs.map((c) => el('article', { class: 'near' },
+              el('div', {},
+                el('a', { class: 'name', href: `/caleb?n=${c.number}` }, fullName(c)),
+                el('div', { class: 'meta' }, `No. ${c.number} · ${miles(c.distance_miles)}`, place(c) ? ` · ${place(c)}` : '')),
+              me.number === null ? null : messageButton(c)))
+          : [el('p', { class: 'empty' }, `No other Calebs within ${radius} miles yet.`)]));
+      } catch (err) {
+        results.replaceChildren(errorBox(err));
+      }
+    }
+
+    initNav('/nearby').then((m) => {
+      if (!m) return (location.href = '/login');
+      me = m;
+      if (me.postal_code) document.getElementById('intro').textContent = `Members within a few miles of ${me.postal_code}, the ZIP code on your profile.`;
+      radiusButtons();
+      load();
+    });
+  </script>
+</body>
+</html>

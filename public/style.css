@@ -251,3 +251,87 @@ form.register h2.form-section:first-child { border-top: 0; padding-top: 0; margi
 .badge + .badge { margin-left: 6px; }
 .badge.admin { background: transparent; border: 1px solid var(--accent); }
 .tag { color: var(--muted); font-size: 0.85rem; }
+
+nav.site a .count {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+.btn.small { padding: 6px 14px; font-size: 0.85rem; }
+.hint.warn { color: var(--danger); }
+
+/* Messages */
+.inbox { display: grid; gap: 8px; }
+.convo {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  text-decoration: none;
+}
+.convo:hover { border-color: var(--accent); }
+.convo .who { font-weight: 600; }
+.convo .when { color: var(--muted); font-size: 0.8rem; text-align: right; }
+.convo .preview { color: var(--muted); font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.convo.unread .who, .convo.unread .preview { color: var(--text); font-weight: 700; }
+.thread { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
+.bubble {
+  max-width: min(80%, 520px);
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.bubble.mine { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.bubble time { display: block; font-size: 0.7rem; opacity: 0.75; margin-top: 2px; }
+.composer { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.picker { display: grid; gap: 6px; margin-top: 8px; }
+.picker button {
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+.picker button:hover { border-color: var(--accent); }
+.announcement { border-left: 4px solid var(--accent); }
+.announcement h3 { margin: 0 0 4px; font: 600 1.05rem var(--serif); }
+.announcement p { margin: 0; white-space: pre-wrap; }
+
+/* Near you */
+.radius { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.radius button { border: 1px solid var(--accent); }
+.near-list { display: grid; gap: 8px; }
+.near {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.near a.name { font: 600 1.05rem var(--serif); color: var(--text); text-decoration: none; }
+.near .meta { color: var(--muted); font-size: 0.9rem; }
+.check { display: flex; gap: 10px; align-items: flex-start; }
+.check input { width: auto; margin-top: 5px; }
+
+main.narrow-wide { max-width: 760px; }

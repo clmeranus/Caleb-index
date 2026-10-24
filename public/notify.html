@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Send a notification · The Caleb Index</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <a class="brand" href="/">The <span>Caleb</span> Index</a>
+      <nav class="site" id="nav"></nav>
+    </div>
+  </header>
+
+  <main class="wrap narrow-wide">
+    <h1>Send a notification</h1>
+    <p class="lede">Notifications appear on every member's Messages page. Members who opted in to email
+      notifications and confirmed their address also get them by email.</p>
+    <div id="form"></div>
+    <h2>Sent notifications</h2>
+    <div id="history" class="inbox"><p class="note">Loading…</p></div>
+  </main>
+
+  <footer class="site"><div class="wrap">The Caleb Index · A members-only register of people named Caleb.</div></footer>
+
+  <script src="/common.js"></script>
+  <script>
+    let emailInfo = { configured: false, recipients: 0 };
+
+    function plural(n, word) {
+      return `${n} ${word}${n === 1 ? '' : 's'}`;
+    }
+
+    function composeForm() {
+      const out = el('div');
+      const emailBox = el('input', { type: 'checkbox', id: 'send_email', name: 'send_email' });
+      emailBox.checked = emailInfo.configured && emailInfo.recipients > 0;
+      emailBox.disabled = !emailInfo.configured;
+      const form = el('form', { class: 'register' },
+        field({ name: 'subject', label: 'Subject', attrs: { required: true, maxlength: 150 } }),
+        field({ name: 'body', label: 'Message', textarea: true, attrs: { required: true, rows: 6, maxlength: 5000 } }),
+        el('div', { class: 'check' },
+          emailBox,
+          el('label', { for: 'send_email' },
+            el('strong', {}, 'Also send by email'),
+            el('div', { class: 'hint' }, emailInfo.configured
+              ? `${plural(emailInfo.recipients, 'member')} opted in and confirmed their address.`
+              : 'Email isn’t set up on this site yet, so this will only appear on the site.'))),
+        out,
+        el('div', {}, el('button', { class: 'btn', type: 'submit' }, 'Send notification')));
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const button = form.querySelector('button[type=submit]');
+        const body = { subject: form.subject.value, body: form.body.value, send_email: emailBox.checked };
+        const who = body.send_email ? `all members, and email ${plural(emailInfo.recipients, 'member')}` : 'all members on the site';
+        if (!confirm(`Send “${body.subject.trim()}” to ${who}?`)) return;
+        button.disabled = true;
+        try {
+          const res = await api('/api/admin/announcements', { method: 'POST', body });
+          form.reset();
+          out.replaceChildren(noticeBox(res.emailing
+            ? `Sent. Emailing ${plural(res.emailing, 'member')} now; the count below updates as they go out.`
+            : 'Sent. Members will see it on their Messages page.'));
+          loadHistory();
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+        button.disabled = false;
+      });
+      return form;
+    }
+
+    async function loadHistory() {
+      const history = document.getElementById('history');
+      try {
+        const res = await api('/api/admin/announcements');
+        emailInfo = res.email;
+        history.replaceChildren(...(res.announcements.length
+          ? res.announcements.map((a) => el('article', { class: 'panel announcement' },
+              el('h3', {}, a.subject),
+              el('p', {}, a.body),
+              el('p', { class: 'hint', style: 'margin-top:6px' },
+                new Date(a.created_at).toLocaleString(), ' · ',
+                a.sender_number ? `by ${a.sender_spelling} ${a.sender_surname}`.trim() : 'by an admin', ' · ',
+                a.emailed
+                  ? `${plural(a.email_sent, 'email')} sent${a.email_failed ? `, ${a.email_failed} failed` : ''}`
+                  : 'site only')))
+          : [el('p', { class: 'empty' }, 'No notifications sent yet.')]));
+      } catch (err) {
+        history.replaceChildren(errorBox(err));
+      }
+    }
+
+    initNav('/notify').then(async (m) => {
+      if (!m) return (location.href = '/login');
+      await loadHistory();
+      document.getElementById('form').replaceChildren(composeForm());
+    });
+  </script>
+</body>
+</html>

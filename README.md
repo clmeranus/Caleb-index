@@ -21,6 +21,20 @@ sequential **Caleb Number** and access to the searchable index.
 Every page except login and sign-up requires a logged-in member, and everything but the
 application page requires a verified one. Only admins see usernames and verification evidence.
 
+## Members' features
+
+- **Profile:** name, town, state or province, ZIP or postal code, country, birth year,
+  occupation, bio and website. The ZIP code is private: it's only used for distances.
+- **Messages** (`/messages`): one-to-one conversations. Start one by Caleb Number or by
+  first and last name, from a profile, or from Near you. The navigation shows unread counts.
+- **Calebs near you** (`/nearby`): members within 5, 10 or 25 miles of your ZIP code,
+  each with a Message button. Distances work for US ZIP codes, using the Census Bureau's
+  ZIP code locations (see [data/README.md](data/README.md)); other postal codes are saved
+  but can't be located yet.
+- **Email notifications:** members can add a private email address and opt in. They
+  confirm the address through a link before anything is sent, and every email has an
+  unsubscribe link.
+
 ## Admins
 
 There are three roles:
@@ -28,6 +42,10 @@ There are three roles:
 - **Owner:** the account named by `ADMIN_USERNAME`. An admin that nobody else can demote or remove.
 - **Admin:** can review applications, remove members, and give or take away admin permission.
 - **Member:** everyone else.
+
+Admins also have a **Notify** page (`/notify`) for sending notifications. Each one appears
+on every member's Messages page and, if you choose, is emailed to members who opted in and
+confirmed their address.
 
 To make someone an admin, open their profile while logged in as an admin and tick
 **Admin permission**. The checkbox only appears for admins, and never on your own
@@ -63,6 +81,9 @@ npm test
 | `VOUCHES_REQUIRED` | `2`       | Vouches needed to approve an applicant                         |
 | `TRUST_PROXY_HOPS` | `0`       | Reverse proxies in front of the app; used to find visitors' IPs for rate limits |
 | `CLIENT_IP_HEADER` | (unset)   | Header your host's proxy sets to the visitor's IP (`Fly-Client-IP` on Fly.io) |
+| `PUBLIC_URL`     | (unset)     | The site's address, used for links in emails                   |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | (unset) | Mail server for email; email is off until these are set (see below) |
+| `EMAIL_FROM`     | `SMTP_USER` | Sender shown on emails, e.g. `The Caleb Index <you@gmail.com>` |
 
 The owner account is created on first start. After that, `ADMIN_PASSWORD` is not
 needed, and changing it has no effect: change the password from the account page.
@@ -94,6 +115,22 @@ Rate limits are counted per visitor IP. On Fly the app reads it from the `Fly-Cl
 header, which Fly's proxy sets (`CLIENT_IP_HEADER` in `fly.toml`). On other hosts,
 `TRUST_PROXY_HOPS` reads it from `X-Forwarded-For` instead.
 
+### Turning on email
+
+Email is off until the site has a mail account to send from. Any provider with SMTP works.
+Add these as Fly secrets (app → **Secrets**), then deploy:
+
+| Secret       | Gmail                                   | Other providers                 |
+| ------------ | --------------------------------------- | ------------------------------- |
+| `SMTP_HOST`  | `smtp.gmail.com`                        | from your provider              |
+| `SMTP_PORT`  | `465`                                   | `465`, or `587`                 |
+| `SMTP_USER`  | your Gmail address                      | from your provider              |
+| `SMTP_PASS`  | a Gmail **app password** (not your normal password) | from your provider  |
+| `EMAIL_FROM` | optional, e.g. `The Caleb Index <you@gmail.com>` | an address you're allowed to send from |
+
+For Gmail, turn on 2-Step Verification, then create an app password at
+<https://myaccount.google.com/apppasswords>. Gmail allows about 500 emails a day.
+
 ## API
 
 | Method   | Path                              | Who                 | Notes                                         |
@@ -114,6 +151,17 @@ header, which Fly's proxy sets (`CLIENT_IP_HEADER` in `fly.toml`). On other host
 | `POST`   | `/api/applicants/:id/vouch`       | verified member     | Vouch; may approve the applicant              |
 | `DELETE` | `/api/applicants/:id/vouch`       | verified member     | Withdraw a vouch                              |
 | `PUT`    | `/api/calebs/:number/admin`       | admin               | `{ "admin": true }` or `{ "admin": false }`   |
+| `PUT`    | `/api/me/email`                   | verified member     | `{ email, opt_in }`; sends a confirmation link |
+| `POST`   | `/api/me/email/confirmation`      | verified member     | Send the confirmation link again              |
+| `POST`   | `/api/email/confirm`              | anyone with the link | `{ token }` from the confirmation email      |
+| `POST`   | `/api/email/unsubscribe`          | anyone with the link | `{ token }` from any notification email      |
+| `GET`    | `/api/messages`                   | verified member     | Conversations and unread count                |
+| `GET`    | `/api/messages/:number`           | verified member     | Conversation with a member; marks it read     |
+| `POST`   | `/api/messages/:number`           | listed member       | `{ body }`, up to 2,000 characters            |
+| `GET`    | `/api/nearby?radius=5\|10\|25`    | verified member     | Members within the radius of your ZIP code    |
+| `GET`    | `/api/announcements`              | verified member     | Recent notifications                          |
+| `GET`    | `/api/admin/announcements`        | admin               | Sent notifications and email delivery counts  |
+| `POST`   | `/api/admin/announcements`        | admin               | `{ subject, body, send_email }`               |
 | `GET`    | `/api/admin/pending`              | admin               | Applications awaiting review                  |
 | `POST`   | `/api/admin/members/:id/verify`   | admin               | Approve and assign a Caleb Number             |
 | `POST`   | `/api/admin/members/:id/reject`   | admin               | `{ reason }`                                  |
@@ -122,8 +170,13 @@ header, which Fly's proxy sets (`CLIENT_IP_HEADER` in `fly.toml`). On other host
 ## Layout
 
 ```
-src/db.js        storage, validation, passwords, sessions, verification, vouching
+src/db.js        storage, migrations, validation, passwords, sessions, verification,
+                 vouching, messages, email settings, notifications
+src/geo.js       ZIP code locations and distances
+src/mail.js      sending email over SMTP
+data/            US ZIP code locations (Census Bureau)
 src/server.js    HTTP server, access control, API routes, static files
-public/          pages (login, register, pending, index, caleb, stats, applicants, account, admin)
+public/          pages (login, register, pending, index, caleb, stats, applicants, account,
+                 messages, nearby, admin, notify, email)
 test/            API tests (node:test)
 ```

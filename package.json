@@ -11,5 +11,8 @@
   "engines": {
     "node": ">=22.13"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "nodemailer": "10.0.16"
+  }
 }

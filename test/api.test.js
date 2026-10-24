@@ -4,6 +4,10 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const store = require('../src/db');
 const { createServer, rateLimiter, clientIp } = require('../src/server');
+// Records emails instead of sending them.
+const sentEmails = [];
+const fakeMailer = { send: async (mail) => { sentEmails.push(mail); } };
+
 let server;
 let base;
 let db;
@@ -17,6 +21,10 @@ before(async () => {
     registerLimit: () => true,
     loginLimit: () => true,
     vouchesRequired: 2,
+    mailer: fakeMailer,
+    publicUrl: 'https://calebs.test',
+    messageLimit: () => true,
+    confirmationLimit: () => true,
   });
   await new Promise((resolve) => server.listen(0, resolve));
   base = `http://localhost:${server.address().port}`;
@@ -376,4 +384,208 @@ test('the owner can create a Caleb listing and joins the index', async () => {
   // With a listing, the owner can vouch like any member.
   const applicant = await apply();
   assert.equal((await owner(`/api/applicants/${applicant.res.body.member.id}/vouch`, { method: 'POST' })).status, 200);
+});
+
+test('existing databases gain the new columns without losing data', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { DatabaseSync } = require('node:sqlite');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'caleb-')), 'old.db');
+  // The members table exactly as the first deployed version created it.
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'admin', 'owner')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'verified', 'rejected')),
+      verification_note TEXT NOT NULL DEFAULT '', review_note TEXT NOT NULL DEFAULT '', verification_method TEXT NOT NULL DEFAULT '',
+      number INTEGER UNIQUE, spelling TEXT NOT NULL DEFAULT '', surname TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '',
+      country TEXT NOT NULL DEFAULT '', birth_year INTEGER, occupation TEXT NOT NULL DEFAULT '', bio TEXT NOT NULL DEFAULT '',
+      website TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT 'x', updated_at TEXT NOT NULL DEFAULT 'x', verified_at TEXT)`);
+  old.prepare("INSERT INTO members (username, password_hash, role, status, number, spelling, surname) VALUES ('CalebMeranus', 'h', 'owner', 'verified', 1, 'Caleb', 'Meranus')").run();
+  old.close();
+
+  const migrated = store.open(file);
+  const row = migrated.prepare('SELECT * FROM members WHERE number = 1').get();
+  assert.equal(row.username, 'CalebMeranus');
+  assert.equal(row.surname, 'Meranus');
+  assert.equal(row.region, '');
+  assert.equal(row.postal_code, '');
+  assert.equal(row.email_opt_in, 0);
+  migrated.close();
+  // Opening again is a no-op.
+  store.open(file).close();
+});
+
+test('postal codes are normalized and US ZIP codes are located', async () => {
+  const m = await verified();
+  const zip = await m.call('/api/me', { method: 'PATCH', body: { postal_code: '60601-1234', region: 'Illinois' } });
+  assert.equal(zip.body.member.postal_code, '60601');
+  assert.equal(zip.body.member.region, 'Illinois');
+  assert.equal(zip.body.member.has_location, 1);
+  const ca = await m.call('/api/me', { method: 'PATCH', body: { postal_code: 'm5v3l9', region: 'Ontario' } });
+  assert.equal(ca.body.member.postal_code, 'M5V 3L9');
+  assert.equal(ca.body.member.has_location, 0, 'only US ZIP codes have locations');
+  const listing = (await m.call(`/api/calebs/${m.number}`)).body;
+  assert.equal(listing.region, 'Ontario');
+  assert.equal(listing.postal_code, undefined, 'the postal code is private');
+});
+
+test('members can be found by full name or Caleb Number', async () => {
+  const m = await verified({ first_name: 'Kaleb', surname: 'Findable' });
+  const byName = await m.call('/api/calebs?q=' + encodeURIComponent('Kaleb Findable'));
+  assert.deepEqual(byName.body.calebs.map((c) => c.number), [m.number]);
+  for (const q of [String(m.number), `#${m.number}`, `No. ${m.number}`]) {
+    const res = await m.call('/api/calebs?q=' + encodeURIComponent(q));
+    assert.ok(res.body.calebs.some((c) => c.number === m.number), q);
+  }
+});
+
+test('members message each other', async () => {
+  const a = await verified({ surname: 'Sender' });
+  const b = await verified({ surname: 'Receiver' });
+
+  const sent = await a.call(`/api/messages/${b.number}`, { method: 'POST', body: { body: '  Hello from one Caleb to another  ' } });
+  assert.equal(sent.status, 201);
+  assert.equal(sent.body.message.body, 'Hello from one Caleb to another');
+  await a.call(`/api/messages/${b.number}`, { method: 'POST', body: { body: 'Second message' } });
+
+  assert.equal((await b.call('/api/me')).body.member.unread_messages, 2);
+  const inbox = (await b.call('/api/messages')).body;
+  assert.equal(inbox.unread, 2);
+  assert.equal(inbox.conversations[0].number, a.number);
+  assert.equal(inbox.conversations[0].last_body, 'Second message');
+  assert.equal(inbox.conversations[0].unread, 2);
+
+  const thread = (await b.call(`/api/messages/${a.number}`)).body;
+  assert.equal(thread.with.surname, 'Sender');
+  assert.deepEqual(thread.messages.map((x) => [x.body, x.from_me]), [['Hello from one Caleb to another', 0], ['Second message', 0]]);
+  assert.equal((await b.call('/api/me')).body.member.unread_messages, 0, 'reading the thread marks it read');
+
+  await b.call(`/api/messages/${a.number}`, { method: 'POST', body: { body: 'Reply' } });
+  const aThread = (await a.call(`/api/messages/${b.number}`)).body.messages;
+  assert.deepEqual(aThread.map((x) => x.from_me), [1, 1, 0]);
+
+  // Not to yourself, not empty, not too long, not to unknown numbers, not by applicants.
+  assert.equal((await a.call(`/api/messages/${a.number}`, { method: 'POST', body: { body: 'hi' } })).status, 400);
+  assert.equal((await a.call(`/api/messages/${b.number}`, { method: 'POST', body: { body: '   ' } })).status, 422);
+  assert.equal((await a.call(`/api/messages/${b.number}`, { method: 'POST', body: { body: 'x'.repeat(2001) } })).status, 422);
+  assert.equal((await a.call('/api/messages/99999', { method: 'POST', body: { body: 'hi' } })).status, 404);
+  const applicant = await apply();
+  assert.equal((await applicant.call(`/api/messages/${b.number}`, { method: 'POST', body: { body: 'hi' } })).status, 403);
+  // Other members can't read the conversation.
+  const c = await verified();
+  assert.equal((await c.call(`/api/messages/${a.number}`)).body.messages.length, 0);
+});
+
+test('Calebs near you within 5, 10 and 25 miles', async () => {
+  const me = await verified({ surname: 'Loop', postal_code: '60601' }); // downtown Chicago
+  const evanston = await verified({ surname: 'Evanston', postal_code: '60201' }); // about 12 miles
+  const ohare = await verified({ surname: 'Ohare', postal_code: '60018' }); // Des Plaines, about 15 miles
+  const la = await verified({ surname: 'Beverly', postal_code: '90210' });
+  const nearby = async (r) => (await me.call(`/api/nearby?radius=${r}`)).body;
+
+  const five = await nearby(5);
+  assert.equal(five.located, true);
+  assert.ok(!five.calebs.some((c) => [evanston.number, ohare.number, la.number].includes(c.number)));
+  const ten = await nearby(10);
+  assert.ok(!ten.calebs.some((c) => c.number === evanston.number));
+  const twentyFive = (await nearby(25)).calebs;
+  const ours = twentyFive.filter((c) => [evanston.number, ohare.number, la.number].includes(c.number));
+  assert.deepEqual(ours.map((c) => c.surname), ['Evanston', 'Ohare'], 'sorted by distance, LA excluded');
+  assert.ok(ours[0].distance_miles > 10 && ours[0].distance_miles < 15);
+  assert.equal(ours[0].latitude, undefined, 'exact coordinates stay private');
+  assert.ok(!twentyFive.some((c) => c.number === me.number), 'you are not near yourself');
+
+  assert.equal((await me.call('/api/nearby?radius=50')).status, 422);
+  const noZip = await verified();
+  assert.deepEqual((await noZip.call('/api/nearby?radius=25')).body, { located: false, calebs: [] });
+});
+
+test('email opt-in needs confirmation, and unsubscribe links work', async () => {
+  const m = await verified({ surname: 'Mailable' });
+  sentEmails.length = 0;
+  const bad = await m.call('/api/me/email', { method: 'PUT', body: { email: 'not-an-email', opt_in: true } });
+  assert.equal(bad.status, 422);
+
+  const res = await m.call('/api/me/email', { method: 'PUT', body: { email: 'caleb@example.com', opt_in: true } });
+  assert.equal(res.body.confirmation, 'sent');
+  assert.equal(res.body.member.email_confirmed, 0);
+  assert.equal(sentEmails.length, 1);
+  assert.equal(sentEmails[0].to, 'caleb@example.com');
+  const link = sentEmails[0].text.match(/https:\/\/calebs\.test\/email\?action=confirm&t=(\S+)/);
+  assert.ok(link, sentEmails[0].text);
+
+  assert.equal((await client()('/api/email/confirm', { method: 'POST', body: { token: 'wrong' } })).status, 404);
+  const confirmed = await client()('/api/email/confirm', { method: 'POST', body: { token: decodeURIComponent(link[1]) } });
+  assert.equal(confirmed.body.email, 'caleb@example.com');
+  assert.equal((await m.call('/api/me')).body.member.email_confirmed, 1);
+
+  // Saving again without changing the address doesn't send another confirmation.
+  const same = await m.call('/api/me/email', { method: 'PUT', body: { email: 'caleb@example.com', opt_in: true } });
+  assert.equal(same.body.confirmation, 'not_needed');
+
+  // A new address must be confirmed again, and the old link stops working.
+  await m.call('/api/me/email', { method: 'PUT', body: { email: 'new@example.com', opt_in: true } });
+  assert.equal((await m.call('/api/me')).body.member.email_confirmed, 0);
+  assert.equal((await client()('/api/email/confirm', { method: 'POST', body: { token: decodeURIComponent(link[1]) } })).status, 404);
+  const newToken = decodeURIComponent(sentEmails.at(-1).text.match(/t=(\S+)/)[1]);
+  await client()('/api/email/confirm', { method: 'POST', body: { token: newToken } });
+
+  const unsub = await client()('/api/email/unsubscribe', { method: 'POST', body: { token: newToken } });
+  assert.equal(unsub.body.email, 'new@example.com');
+  assert.equal((await m.call('/api/me')).body.member.email_opt_in, 0);
+});
+
+test('admins send notifications by email to confirmed, opted-in members', async () => {
+  const admin = await login('admin', 'admin-password-123');
+  // Start from a clean slate: nobody opted in.
+  db.prepare('UPDATE members SET email_opt_in = 0').run();
+
+  const optedIn = await verified({ surname: 'OptedIn' });
+  await optedIn.call('/api/me/email', { method: 'PUT', body: { email: 'in@example.com', opt_in: true } });
+  const token = decodeURIComponent(sentEmails.at(-1).text.match(/t=(\S+)/)[1]);
+  await client()('/api/email/confirm', { method: 'POST', body: { token } });
+  const unconfirmed = await verified();
+  await unconfirmed.call('/api/me/email', { method: 'PUT', body: { email: 'pending@example.com', opt_in: true } });
+  const optedOut = await verified();
+  await optedOut.call('/api/me/email', { method: 'PUT', body: { email: 'out@example.com', opt_in: false } });
+
+  const member = await verified();
+  assert.equal((await member.call('/api/admin/announcements')).status, 403);
+  assert.equal((await member.call('/notify')).location, '/');
+  assert.equal((await member.call('/api/admin/announcements', { method: 'POST', body: { subject: 'x', body: 'y' } })).status, 403);
+
+  const info = (await admin('/api/admin/announcements')).body.email;
+  assert.deepEqual(info, { configured: true, recipients: 1 });
+
+  sentEmails.length = 0;
+  const res = await admin('/api/admin/announcements', {
+    method: 'POST',
+    body: { subject: 'Caleb meetup', body: 'Join us on Saturday.', send_email: true },
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.emailing, 1);
+  for (let i = 0; i < 50 && sentEmails.length < 1; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(sentEmails.map((e) => e.to), ['in@example.com']);
+  assert.equal(sentEmails[0].subject, 'Caleb meetup');
+  assert.match(sentEmails[0].text, /Join us on Saturday\.[\s\S]*Unsubscribe: https:\/\/calebs\.test\/email\?action=unsubscribe&t=/);
+  assert.match(sentEmails[0].headers['List-Unsubscribe'], /^<https:\/\/calebs\.test\/email\?action=unsubscribe/);
+
+  const history = (await admin('/api/admin/announcements')).body.announcements[0];
+  assert.equal(history.subject, 'Caleb meetup');
+  assert.equal(history.email_sent, 1);
+
+  // Every member sees it on the site, without the delivery numbers.
+  const seen = (await member.call('/api/announcements')).body.announcements[0];
+  assert.equal(seen.body, 'Join us on Saturday.');
+  assert.equal(seen.email_sent, undefined);
+
+  // A notification can be posted without emailing anyone.
+  sentEmails.length = 0;
+  const siteOnly = await admin('/api/admin/announcements', { method: 'POST', body: { subject: 'Site only', body: 'Hi', send_email: false } });
+  assert.equal(siteOnly.body.emailing, 0);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(sentEmails.length, 0);
+  assert.equal((await admin('/api/admin/announcements', { method: 'POST', body: { subject: '', body: 'Hi' } })).status, 422);
 });

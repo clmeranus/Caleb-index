@@ -12,7 +12,11 @@ WORKDIR /app
 # Set production environment
 ENV NODE_ENV="production"
 
-# The app has no npm dependencies, so there is nothing to install or compile.
+# Install the exact dependency versions from package-lock.json (just nodemailer,
+# which is plain JavaScript, so nothing needs compiling).
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 COPY . .
 
 # Run node directly (not through npm) so it receives the stop signal on deploys

@@ -37,11 +37,78 @@
             window.scrollTo(0, 0);
             return;
           }
-          out.replaceChildren(noticeBox('Your listing has been saved.'));
+          out.replaceChildren(
+            noticeBox('Your listing has been saved.'),
+            member.postal_code && !member.has_location
+              ? el('p', { class: 'hint warn' }, `We couldn't find the location of ${member.postal_code}, so Calebs near you won't work with it. Distance search works with US ZIP codes for now.`)
+              : ''
+          );
         } catch (err) {
           out.replaceChildren(errorBox(err));
         }
       });
+      return form;
+    }
+
+    function emailSection(m) {
+      const out = el('div');
+      const status = el('div');
+      const optIn = el('input', { type: 'checkbox', id: 'email_opt_in' });
+      optIn.checked = Boolean(m.email_opt_in);
+      const emailInput = el('input', { id: 'email', name: 'email', type: 'email', value: m.email || '', maxlength: 254, autocomplete: 'email', placeholder: 'you@example.com' });
+
+      const showStatus = (member) => {
+        let text = '';
+        let resend = false;
+        if (!member.email) text = 'No email saved.';
+        else if (!member.email_opt_in) text = 'Saved. You won’t get email notifications.';
+        else if (member.email_confirmed) text = 'Confirmed. You’ll get email notifications.';
+        else {
+          text = member.email_available
+            ? 'Waiting for you to confirm: check your inbox for a link.'
+            : 'Saved. Email isn’t set up on the site yet, so we’ll send your confirmation link once it is.';
+          resend = member.email_available;
+        }
+        status.replaceChildren(el('p', { class: 'hint', style: 'margin:0' }, text, ' ',
+          resend ? el('button', { class: 'link', type: 'button', onclick: resendConfirmation }, 'Send the link again') : ''));
+      };
+
+      async function resendConfirmation() {
+        try {
+          await api('/api/me/email/confirmation', { method: 'POST' });
+          out.replaceChildren(noticeBox(`We sent a new confirmation link to ${emailInput.value}.`));
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      }
+
+      const form = el('form', { class: 'register' },
+        el('div', { class: 'field' },
+          el('label', { for: 'email' }, 'Email'),
+          emailInput,
+          el('div', { class: 'hint' }, 'Private: only you can see it.')),
+        el('div', { class: 'check' },
+          optIn,
+          el('label', { for: 'email_opt_in' },
+            el('strong', {}, 'Opt in to email notifications'),
+            el('div', { class: 'hint' }, 'Get notifications from the admins by email. We’ll send a link to confirm your address first, and every email has an unsubscribe link.'))),
+        status,
+        out,
+        el('div', {}, el('button', { class: 'btn', type: 'submit' }, 'Save email settings')));
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          const { member, confirmation } = await api('/api/me/email', { method: 'PUT', body: { email: emailInput.value, opt_in: optIn.checked } });
+          optIn.checked = Boolean(member.email_opt_in);
+          showStatus(member);
+          out.replaceChildren(noticeBox(confirmation === 'sent'
+            ? `Saved. We sent a confirmation link to ${member.email}. Click it to start getting email notifications.`
+            : 'Your email settings have been saved.'));
+        } catch (err) {
+          out.replaceChildren(errorBox(err));
+        }
+      });
+      showStatus(m);
       return form;
     }
 
@@ -114,6 +181,8 @@
               el('p', { class: 'hint' }, 'Your account doesn’t have a Caleb listing yet. Add one to appear in the Index with the next Caleb Number.'),
               profileSection(m),
             ],
+        el('h2', {}, 'Email'),
+        emailSection(m),
         el('h2', {}, 'Password'),
         passwordSection(),
         m.role !== 'owner' && [el('h2', {}, 'Delete account'), deleteSection()],
