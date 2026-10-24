@@ -1,0 +1,26 @@
+# Checks that the site's address resolves on major public DNS resolvers and that
+# the site loads. Run it from the repository's Actions tab ("Run workflow").
+name: Check site
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      HOST: caleb-index.fly.dev
+    steps:
+      - name: DNS lookups
+        run: |
+          for resolver in 8.8.8.8 1.1.1.1 9.9.9.9 208.67.222.222; do
+            echo "== $resolver"
+            echo "A:    $(dig +short A "$HOST" @"$resolver" | tr '\n' ' ')"
+            echo "AAAA: $(dig +short AAAA "$HOST" @"$resolver" | tr '\n' ' ')"
+          done
+
+      - name: Load the login page
+        run: curl -sS -o /dev/null -w "HTTP %{http_code} from %{remote_ip} in %{time_total}s\n" "https://$HOST/login"
