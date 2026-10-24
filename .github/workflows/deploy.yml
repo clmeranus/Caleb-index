@@ -1,0 +1,41 @@
+# Deploys the site to Fly.io whenever master changes, or on demand from the
+# repository's Actions tab ("Run workflow"). Needs the FLY_API_TOKEN repository secret.
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push waits for the running deploy to finish.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        run: flyctl deploy --remote-only
+
+      - name: Check the site responds
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null https://caleb-index.fly.dev/healthz; then
+              echo "https://caleb-index.fly.dev is up."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "https://caleb-index.fly.dev did not respond within 5 minutes."
+          exit 1
